@@ -8,7 +8,634 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js">
+    /* =========================================================
+       SMART CAP OPTION FILLING LIST GENERATOR LOGIC
+       ========================================================= */
+    let smartListState = [];
+    let smartListOriginal = [];
+    let smartActiveModalTargetIndex = null; // null for Add, number for Replace
+    let smartSelectedBranches = new Set();
+
+    // Top tech branch keywords for quick preset
+    const TECH_BRANCH_KEYWORDS = ['computer', 'information technology', 'artificial intelligence', 'data science', 'cyber', 'software', 'machine learning'];
+    const CIRCUITAL_BRANCH_KEYWORDS = ['electronics', 'telecommunication', 'electrical', 'instrumentation'];
+    const CORE_BRANCH_KEYWORDS = ['mechanical', 'civil', 'chemical', 'automobile', 'production', 'aerospace', 'metallurgy'];
+
+    // Initialize UI options for Smart List
+    function initSmartListUI() {
+      // Populate dream college dropdown
+      const dreamSelect = document.getElementById('smart-dream-college');
+      if (dreamSelect && dreamSelect.options.length <= 1) {
+        DATA.institutes.slice().sort((a, b) => a[1].localeCompare(b[1])).forEach(inst => {
+          const opt = document.createElement('option');
+          opt.value = inst[0];
+          opt.textContent = `${inst[0]} - ${inst[1]} (${inst[3] || 'MH'})`;
+          dreamSelect.appendChild(opt);
+        });
+      }
+
+      // Populate branch chips
+      const chipsContainer = document.getElementById('smart-branch-chips-container');
+      if (chipsContainer && chipsContainer.children.length === 0) {
+        // Collect sorted unique branches
+        UNIQUE_BRANCHES.slice().sort().forEach(br => {
+          const chip = document.createElement('div');
+          chip.className = 'smart-chip';
+          chip.dataset.branch = br;
+          chip.textContent = br;
+          chip.onclick = () => toggleSmartBranchChip(br, chip);
+          chipsContainer.appendChild(chip);
+        });
+
+        // Default: activate Tech branches
+        smartSelectBranchPreset('tech');
+      }
+    }
+
+    function toggleSmartBranchChip(branchName, chipEl) {
+      if (smartSelectedBranches.has(branchName)) {
+        smartSelectedBranches.delete(branchName);
+        chipEl.classList.remove('active');
+      } else {
+        smartSelectedBranches.add(branchName);
+        chipEl.classList.add('active');
+      }
+    }
+
+    function smartSelectBranchPreset(preset) {
+      const chips = document.querySelectorAll('#smart-branch-chips-container .smart-chip');
+      smartSelectedBranches.clear();
+
+      chips.forEach(chip => {
+        const br = chip.dataset.branch.toLowerCase();
+        let match = false;
+
+        if (preset === 'tech') {
+          match = TECH_BRANCH_KEYWORDS.some(k => br.includes(k));
+        } else if (preset === 'circuital') {
+          match = CIRCUITAL_BRANCH_KEYWORDS.some(k => br.includes(k));
+        } else if (preset === 'core') {
+          match = CORE_BRANCH_KEYWORDS.some(k => br.includes(k));
+        } else if (preset === 'all') {
+          match = true;
+        } else if (preset === 'clear') {
+          match = false;
+        }
+
+        if (match) {
+          smartSelectedBranches.add(chip.dataset.branch);
+          chip.classList.add('active');
+        } else {
+          chip.classList.remove('active');
+        }
+      });
+
+      if (preset !== 'clear' && smartSelectedBranches.size === 0) {
+        // Fallback: select first 5
+        chips.forEach((c, idx) => {
+          if (idx < 5) {
+            smartSelectedBranches.add(c.dataset.branch);
+            c.classList.add('active');
+          }
+        });
+      }
+    }
+
+    function isMatchingSeat(seatCode, prefCat, prefGender) {
+      if (prefCat === 'TFWS') return seatCode === 'TFWS';
+      if (prefCat === 'EWS') return seatCode === 'EWS';
+      if (!seatCode.includes(prefCat)) return false;
+      if (prefGender === 'L') {
+        return seatCode.startsWith('L') || seatCode.startsWith('G') || seatCode === prefCat;
+      } else if (prefGender === 'G') {
+        return seatCode.startsWith('G') || seatCode === prefCat;
+      }
+      return true;
+    }
+
+    // Recommendation Engine: Generates balanced 25-30 options
+    function executeSmartCAPGenerator() {
+      const pctInput = document.getElementById('smart-percentile');
+      const pctVal = parseFloat(pctInput.value);
+      const errorEl = document.getElementById('smart-pct-error');
+
+      if (isNaN(pctVal) || pctVal < 0 || pctVal > 100) {
+        errorEl.style.display = 'block';
+        pctInput.focus();
+        return;
+      }
+      errorEl.style.display = 'none';
+
+      const prefCat = document.getElementById('smart-category').value;
+      const prefGender = document.getElementById('smart-gender').value;
+      const prefRound = document.getElementById('smart-round').value;
+      const prefDistrict = document.getElementById('smart-district').value;
+      const prefType = document.getElementById('smart-type').value;
+      const dreamCode = document.getElementById('smart-dream-college').value;
+
+      // Ensure at least one branch selected
+      if (smartSelectedBranches.size === 0) {
+        showToast("Selecting All Tech Branches by default.");
+        smartSelectBranchPreset('tech');
+      }
+
+      const roundPriority = { 'CAP3': 3, 'CAP2': 2, 'CAP1': 1 };
+      const maxAllowedRound = prefRound === 'CAP1' ? 1 : (prefRound === 'CAP2' ? 2 : 3);
+
+      // Filter and evaluate cutoffs strictly from dataset
+      const eligibleMap = new Map(); // Key: `${instCode}_${branchName}`, Value: best candidate
+
+      DATA.cutoffs.forEach(c => {
+        const branchIdx = c[0];
+        const seatCode = c[1];
+        const round = c[2];
+        const cutoffPct = c[3];
+        const closingRank = c[4];
+
+        // Check Round filter with intelligent fallback (e.g. if CAP3 picked, allow latest round up to CAP3)
+        const rWeight = roundPriority[round] || 1;
+        if (prefRound !== 'any' && rWeight > maxAllowedRound) return;
+
+        // Check Category & Gender Seat Quota
+        if (!isMatchingSeat(seatCode, prefCat, prefGender)) return;
+
+        // Branch matching
+        const branchName = BRANCH_MAP[branchIdx];
+        if (!smartSelectedBranches.has(branchName)) return;
+
+        // Institute & Location filtering
+        const branchData = DATA.branches[branchIdx];
+        const instIdx = branchData[1];
+        const inst = DATA.institutes[instIdx];
+        const instCode = inst[0];
+        const instName = inst[1];
+        const instType = inst[2];
+        const city = inst[3] || 'Maharashtra';
+
+        if (prefDistrict !== 'all' && city !== prefDistrict) return;
+        if (prefType !== 'all') {
+          if (prefType === 'Government' && !instType.toLowerCase().includes('govt') && !instType.toLowerCase().includes('government')) return;
+          if (prefType === 'Unaided' && (instType.toLowerCase().includes('govt') || instType.toLowerCase().includes('government'))) return;
+        }
+
+        // Calculate diff: student percentile minus cutoff
+        const diff = pctVal - cutoffPct;
+
+        // Candidate classification:
+        // Dream: cutoffPct > pctVal (aspirational)
+        // Target: pctVal - 3.5 <= cutoffPct <= pctVal
+        // Safe: pctVal - 14.0 <= cutoffPct < pctVal - 3.5
+        let tier = 'safe';
+        if (cutoffPct > pctVal) {
+          tier = 'dream';
+        } else if (diff <= 3.5) {
+          tier = 'target';
+        } else {
+          tier = 'safe';
+        }
+
+        const key = `${instCode}_${branchName}`;
+        const existing = eligibleMap.get(key);
+
+        // Keep latest round, and within same round highest cutoff record
+        const existingRWeight = existing ? (roundPriority[existing.round] || 0) : -1;
+        if (!existing || rWeight > existingRWeight || (rWeight === existingRWeight && cutoffPct > existing.cutoffPercentile)) {
+          eligibleMap.set(key, {
+            instCode: instCode,
+            instName: instName,
+            instType: instType,
+            city: city,
+            branchName: branchName,
+            branchCode: branchData[0],
+            seatCode: seatCode,
+            round: round,
+            cutoffPercentile: cutoffPct,
+            closingRank: closingRank,
+            diff: diff,
+            tier: tier
+          });
+        }
+      });
+
+      const allEligible = Array.from(eligibleMap.values());
+
+      // If dream college specified, ensure its top branch is extracted and pinned
+      let pinnedDreamOption = null;
+      if (dreamCode !== 'none') {
+        const dreamMatches = allEligible.filter(item => item.instCode === dreamCode);
+        if (dreamMatches.length > 0) {
+          dreamMatches.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+          pinnedDreamOption = dreamMatches[0];
+          pinnedDreamOption.tier = 'dream';
+          pinnedDreamOption.isPinned = true;
+        } else {
+          // Fallback search across all branches for this dream college
+          const dreamFallbacks = [];
+          DATA.cutoffs.forEach(c => {
+            const bIdx = c[0];
+            const bData = DATA.branches[bIdx];
+            const iIdx = bData[1];
+            const inst = DATA.institutes[iIdx];
+            if (inst[0] === dreamCode && isMatchingSeat(c[1], prefCat, prefGender)) {
+              dreamFallbacks.push({
+                instCode: inst[0],
+                instName: inst[1],
+                instType: inst[2],
+                city: inst[3] || 'Maharashtra',
+                branchName: BRANCH_MAP[bIdx],
+                branchCode: bData[0],
+                seatCode: c[1],
+                round: c[2],
+                cutoffPercentile: c[3],
+                closingRank: c[4],
+                diff: pctVal - c[3],
+                tier: 'dream',
+                isPinned: true
+              });
+            }
+          });
+          if (dreamFallbacks.length > 0) {
+            dreamFallbacks.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+            pinnedDreamOption = dreamFallbacks[0];
+          }
+        }
+      }
+
+      // Group into tiers
+      const dreamPool = allEligible.filter(item => item.tier === 'dream' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
+      const targetPool = allEligible.filter(item => item.tier === 'target' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
+      const safePool = allEligible.filter(item => item.tier === 'safe' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
+
+      // Sort pools
+      // Dream: highest cutoff first (aspirational top colleges)
+      dreamPool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+      // Target: closest to student's percentile first
+      targetPool.sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff));
+      // Safe: comfortable cutoffs descending
+      safePool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+
+      // Select target counts: Dream 6-8, Target 11-12, Safe 9-10 (total ~28)
+      const targetDreamCount = pinnedDreamOption ? 6 : 7;
+      const targetTargetCount = 12;
+      const targetSafeCount = 9;
+
+      const selectedList = [];
+
+      // Add pinned dream option first if available
+      if (pinnedDreamOption) {
+        selectedList.push(pinnedDreamOption);
+      }
+
+      // Add Dream options
+      const selectedDream = dreamPool.slice(0, targetDreamCount);
+      selectedList.push(...selectedDream);
+
+      // Add Target options
+      const selectedTarget = targetPool.slice(0, targetTargetCount);
+      selectedList.push(...selectedTarget);
+
+      // Add Safe options
+      const selectedSafe = safePool.slice(0, targetSafeCount);
+      selectedList.push(...selectedSafe);
+
+      // If user had narrow filters and total is less than 25, pull remaining from any eligible
+      if (selectedList.length < 25 && allEligible.length > selectedList.length) {
+        const currentKeys = new Set(selectedList.map(item => `${item.instCode}_${item.branchName}`));
+        for (const item of allEligible) {
+          const key = `${item.instCode}_${item.branchName}`;
+          if (!currentKeys.has(key)) {
+            selectedList.push(item);
+            currentKeys.add(key);
+            if (selectedList.length >= 28) break;
+          }
+        }
+      }
+
+      // Save snapshots
+      smartListState = selectedList.map((item, idx) => ({ ...item, optionNum: idx + 1 }));
+      smartListOriginal = JSON.parse(JSON.stringify(smartListState));
+
+      // Render the results
+      renderSmartList();
+
+      const resultsContainer = document.getElementById('smartlist-results-container');
+      resultsContainer.style.display = 'block';
+      resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      showToast(`Smart CAP preference list generated with ${smartListState.length} colleges.`);
+    }
+
+    // Render option cards
+    function renderSmartList() {
+      const listContainer = document.getElementById('smart-options-list');
+      if (!listContainer) return;
+
+      listContainer.innerHTML = '';
+
+      let dreamCount = 0;
+      let targetCount = 0;
+      let safeCount = 0;
+
+      smartListState.forEach((item, idx) => {
+        item.optionNum = idx + 1;
+        if (item.tier === 'dream') dreamCount++;
+        else if (item.tier === 'target') targetCount++;
+        else safeCount++;
+
+        const card = document.createElement('div');
+        card.className = `smart-option-card tier-${item.tier}`;
+        card.id = `smart-opt-card-${idx}`;
+
+        let tierBadgeHtml = '';
+        if (item.tier === 'dream') {
+          tierBadgeHtml = `<span class="smart-badge-dream">${item.isPinned ? '📌 Designated Dream' : '🌟 Dream'}</span>`;
+        } else if (item.tier === 'target') {
+          tierBadgeHtml = `<span class="smart-badge-target">🎯 Target</span>`;
+        } else {
+          tierBadgeHtml = `<span class="smart-badge-safe">🛡️ Safe</span>`;
+        }
+
+        const isFirst = idx === 0;
+        const isLast = idx === smartListState.length - 1;
+
+        const cutoffLabel = item.cutoffPercentile ? `${item.cutoffPercentile.toFixed(2)} %ile` : 'N/A';
+        const rankLabel = item.closingRank ? `Rank ${item.closingRank.toLocaleString()}` : '';
+
+        card.innerHTML = `
+          <div class="smart-opt-num">#${item.optionNum}</div>
+          <div class="smart-opt-body">
+            <div class="smart-opt-title">
+              <a href="#college/${item.instCode}" onclick="showCollegeDetailPage('${item.instCode}')" style="color: var(--text-main); text-decoration: none; hover: text-decoration: underline;">
+                ${item.instName}
+              </a>
+              <span style="font-size: 0.78rem; color: var(--text-dim); font-weight: 500;">[Code: ${item.instCode}]</span>
+              ${tierBadgeHtml}
+            </div>
+            <div class="smart-opt-sub">
+              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${item.branchName}</span></span>
+              <span><strong>City:</strong> ${item.city}</span>
+              <span><strong>Cutoff:</strong> ${cutoffLabel}</span>
+              ${rankLabel ? `<span><strong>Closing:</strong> ${rankLabel}</span>` : ''}
+              <span><strong>Quota:</strong> ${item.seatCode || 'General'}</span>
+            </div>
+          </div>
+          <div class="smart-opt-actions">
+            <button type="button" class="btn-opt-action" title="Move Up" onclick="moveSmartOption(${idx}, -1)" ${isFirst ? 'disabled' : ''}>⬆️</button>
+            <button type="button" class="btn-opt-action" title="Move Down" onclick="moveSmartOption(${idx}, 1)" ${isLast ? 'disabled' : ''}>⬇️</button>
+            <button type="button" class="btn-opt-action" title="Replace with Alternative" onclick="openReplaceSmartModal(${idx})">🔄</button>
+            <button type="button" class="btn-opt-action delete" title="Remove Option" onclick="removeSmartOption(${idx})">✕</button>
+          </div>
+        `;
+
+        listContainer.appendChild(card);
+      });
+
+      // Update counters
+      document.getElementById('smart-total-count').textContent = `${smartListState.length} Options`;
+      document.getElementById('smart-badge-dream-count').textContent = `🌟 ${dreamCount} Dream`;
+      document.getElementById('smart-badge-target-count').textContent = `🎯 ${targetCount} Target`;
+      document.getElementById('smart-badge-safe-count').textContent = `🛡️ ${safeCount} Safe`;
+    }
+
+    // Move option up or down
+    function moveSmartOption(index, direction) {
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= smartListState.length) return;
+
+      const temp = smartListState[index];
+      smartListState[index] = smartListState[targetIndex];
+      smartListState[targetIndex] = temp;
+
+      renderSmartList();
+      showToast(`Moved option to #${targetIndex + 1}`);
+    }
+
+    // Remove option
+    function removeSmartOption(index) {
+      const removed = smartListState.splice(index, 1)[0];
+      renderSmartList();
+      showToast(`Removed #${index + 1}: ${removed.instName.slice(0, 24)}...`);
+    }
+
+    // Reset list order to original recommendation
+    function resetSmartOrder() {
+      if (!smartListOriginal.length) return;
+      smartListState = JSON.parse(JSON.stringify(smartListOriginal));
+      renderSmartList();
+      showToast("Preference list order restored to algorithmic recommendation.");
+    }
+
+    // Modal Handling for Replace & Add
+    function openReplaceSmartModal(index) {
+      smartActiveModalTargetIndex = index;
+      const targetItem = smartListState[index];
+      document.getElementById('smart-modal-title').textContent = `Replace Option #${index + 1} (${targetItem.branchName.slice(0, 30)}...)`;
+      document.getElementById('smart-modal-search').value = '';
+      document.getElementById('smart-modal-filter-tier').value = targetItem.tier || 'all';
+
+      populateSmartModalCandidates(targetItem);
+      document.getElementById('smart-modal-backdrop').classList.add('open');
+    }
+
+    function openAddSmartModal() {
+      smartActiveModalTargetIndex = null;
+      document.getElementById('smart-modal-title').textContent = "Add College Option to Preference List";
+      document.getElementById('smart-modal-search').value = '';
+      document.getElementById('smart-modal-filter-tier').value = 'all';
+
+      populateSmartModalCandidates(null);
+      document.getElementById('smart-modal-backdrop').classList.add('open');
+    }
+
+    function closeSmartModal() {
+      document.getElementById('smart-modal-backdrop').classList.remove('open');
+    }
+
+    let currentModalCandidates = [];
+
+    function populateSmartModalCandidates(referenceItem) {
+      const pctInput = document.getElementById('smart-percentile');
+      const studentPct = parseFloat(pctInput.value) || 95.0;
+      const existingKeys = new Set(smartListState.map(item => `${item.instCode}_${item.branchName}`));
+
+      const listContainer = document.getElementById('smart-modal-list');
+      listContainer.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading candidates from verified cutoffs...</div>';
+
+      // Build candidate list from cutoffs
+      const candidates = [];
+      const seen = new Set();
+
+      DATA.cutoffs.forEach(c => {
+        const branchIdx = c[0];
+        const seatCode = c[1];
+        const round = c[2];
+        const cutoffPct = c[3];
+        const closingRank = c[4];
+
+        const branchData = DATA.branches[branchIdx];
+        const instIdx = branchData[1];
+        const inst = DATA.institutes[instIdx];
+        const instCode = inst[0];
+        const branchName = BRANCH_MAP[branchIdx];
+
+        const key = `${instCode}_${branchName}`;
+        if (existingKeys.has(key) || seen.has(key)) return;
+
+        let tier = 'safe';
+        if (cutoffPct > studentPct) tier = 'dream';
+        else if (studentPct - cutoffPct <= 3.5) tier = 'target';
+        else tier = 'safe';
+
+        seen.add(key);
+        candidates.push({
+          instCode: instCode,
+          instName: inst[1],
+          instType: inst[2],
+          city: inst[3] || 'Maharashtra',
+          branchName: branchName,
+          seatCode: seatCode,
+          round: round,
+          cutoffPercentile: cutoffPct,
+          closingRank: closingRank,
+          tier: tier
+        });
+      });
+
+      // Sort: if reference item provided, prioritize same branch & similar tier
+      if (referenceItem) {
+        candidates.sort((a, b) => {
+          const aBranchMatch = a.branchName === referenceItem.branchName ? 1 : 0;
+          const bBranchMatch = b.branchName === referenceItem.branchName ? 1 : 0;
+          if (aBranchMatch !== bBranchMatch) return bBranchMatch - aBranchMatch;
+          return Math.abs(a.cutoffPercentile - referenceItem.cutoffPercentile) - Math.abs(b.cutoffPercentile - referenceItem.cutoffPercentile);
+        });
+      } else {
+        candidates.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+      }
+
+      currentModalCandidates = candidates.slice(0, 150); // Keep top 150 relevant matches
+      renderModalCandidateList(currentModalCandidates);
+    }
+
+    function filterSmartModalOptions() {
+      const query = document.getElementById('smart-modal-search').value.toLowerCase().trim();
+      const tierFilter = document.getElementById('smart-modal-filter-tier').value;
+
+      const filtered = currentModalCandidates.filter(item => {
+        if (tierFilter !== 'all' && item.tier !== tierFilter) return false;
+        if (!query) return true;
+        return item.instName.toLowerCase().includes(query) ||
+               item.branchName.toLowerCase().includes(query) ||
+               item.city.toLowerCase().includes(query) ||
+               item.instCode.includes(query);
+      });
+
+      renderModalCandidateList(filtered);
+    }
+
+    function renderModalCandidateList(list) {
+      const container = document.getElementById('smart-modal-list');
+      container.innerHTML = '';
+
+      if (list.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">No matching colleges found. Try broadening your search.</div>';
+        return;
+      }
+
+      list.slice(0, 50).forEach(candidate => {
+        const itemEl = document.createElement('div');
+        itemEl.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.75rem 1rem; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; transition: var(--transition);';
+        
+        let tierBadge = '';
+        if (candidate.tier === 'dream') tierBadge = '<span class="smart-badge-dream">🌟 Dream</span>';
+        else if (candidate.tier === 'target') tierBadge = '<span class="smart-badge-target">🎯 Target</span>';
+        else tierBadge = '<span class="smart-badge-safe">🛡️ Safe</span>';
+
+        itemEl.innerHTML = `
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 0.92rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <span>${candidate.instName}</span>
+              <span style="font-size: 0.75rem; color: var(--text-dim);">[${candidate.instCode}]</span>
+              ${tierBadge}
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 1rem; flex-wrap: wrap;">
+              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${candidate.branchName}</span></span>
+              <span><strong>City:</strong> ${candidate.city}</span>
+              <span><strong>Cutoff:</strong> ${candidate.cutoffPercentile.toFixed(2)} %ile</span>
+            </div>
+          </div>
+          <button type="button" class="glow-button" style="padding: 0.4rem 0.9rem; font-size: 0.82rem; white-space: nowrap;">
+            ${smartActiveModalTargetIndex !== null ? 'Swap In' : 'Add to List'}
+          </button>
+        `;
+
+        itemEl.querySelector('button').onclick = () => selectModalCandidate(candidate);
+        container.appendChild(itemEl);
+      });
+    }
+
+    function selectModalCandidate(candidate) {
+      if (smartActiveModalTargetIndex !== null) {
+        // Replace
+        smartListState[smartActiveModalTargetIndex] = { ...candidate, optionNum: smartActiveModalTargetIndex + 1 };
+        showToast(`Replaced Option #${smartActiveModalTargetIndex + 1}`);
+      } else {
+        // Add to end
+        smartListState.push({ ...candidate, optionNum: smartListState.length + 1 });
+        showToast(`Added new option #${smartListState.length}`);
+      }
+
+      closeSmartModal();
+      renderSmartList();
+    }
+
+    // Export to CSV
+    function exportSmartListCSV() {
+      if (!smartListState.length) {
+        showToast("Please generate a preference list first.");
+        return;
+      }
+
+      const headers = ["Option Number", "Institute Code", "Institute Name", "Location/City", "Institute Type", "Branch Name", "Seat Quota", "Cutoff Percentile", "Closing Rank", "Admission Chance Tier"];
+      const rows = [headers.join(",")];
+
+      smartListState.forEach(item => {
+        const row = [
+          item.optionNum,
+          `"${item.instCode}"`,
+          `"${(item.instName || '').replace(/"/g, '""')}"`,
+          `"${(item.city || '').replace(/"/g, '""')}"`,
+          `"${(item.instType || '').replace(/"/g, '""')}"`,
+          `"${(item.branchName || '').replace(/"/g, '""')}"`,
+          `"${item.seatCode || 'General'}"`,
+          item.cutoffPercentile ? item.cutoffPercentile.toFixed(2) : "",
+          item.closingRank || "",
+          `"${item.tier.toUpperCase()}"`
+        ];
+        rows.push(row.join(","));
+      });
+
+      const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(rows.join("\n"));
+      const link = document.createElement("a");
+      link.setAttribute("href", csvContent);
+      link.setAttribute("download", `MahaCET_2026_Smart_CAP_Option_List.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast("Downloaded Smart CAP Preference List CSV successfully!");
+    }
+
+    // Print / PDF
+    function printSmartListPDF() {
+      if (!smartListState.length) {
+        showToast("Please generate a preference list first.");
+        return;
+      }
+      window.print();
+    }
+
+  </script>
   <style>
     /* =========================================================
        MAHACOLLEGE PREDICTOR 2026 — LIQUID GLASS THEME SYSTEM
@@ -1435,7 +2062,250 @@
         grid-template-columns: 1fr;
       }
     }
-  </style>
+  
+    /* =========================================================
+       SMART CAP OPTION FILLING LIST GENERATOR STYLES
+       ========================================================= */
+    .smart-badge-dream {
+      background: rgba(128, 87, 255, 0.16);
+      border: 1px solid rgba(128, 87, 255, 0.45);
+      color: #B794F6;
+      font-weight: 700;
+      font-size: 0.72rem;
+      padding: 0.22rem 0.65rem;
+      border-radius: 9999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      box-shadow: 0 0 10px rgba(128, 87, 255, 0.2);
+    }
+    .smart-badge-target {
+      background: rgba(36, 87, 255, 0.16);
+      border: 1px solid rgba(50, 217, 255, 0.4);
+      color: #38BDF8;
+      font-weight: 700;
+      font-size: 0.72rem;
+      padding: 0.22rem 0.65rem;
+      border-radius: 9999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .smart-badge-safe {
+      background: rgba(16, 185, 129, 0.16);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #34D399;
+      font-weight: 700;
+      font-size: 0.72rem;
+      padding: 0.22rem 0.65rem;
+      border-radius: 9999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .smart-option-card {
+      background: var(--bg-dark-card);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-md);
+      padding: 1.1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      transition: var(--transition);
+      position: relative;
+    }
+    .smart-option-card:hover {
+      border-color: var(--glass-border-luminous);
+      background: var(--glass-bg-hover);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      transform: translateY(-1px);
+    }
+    .smart-option-card.tier-dream {
+      border-left: 4px solid var(--violet);
+    }
+    .smart-option-card.tier-target {
+      border-left: 4px solid var(--royal);
+    }
+    .smart-option-card.tier-safe {
+      border-left: 4px solid var(--safe);
+    }
+
+    .smart-opt-num {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--glass-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 1.05rem;
+      color: var(--cyan);
+      flex-shrink: 0;
+    }
+    .smart-opt-body {
+      flex: 1;
+      min-width: 0;
+    }
+    .smart-opt-title {
+      font-size: 1.02rem;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 0.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+    }
+    .smart-opt-sub {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .smart-opt-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      flex-shrink: 0;
+    }
+    .btn-opt-action {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--glass-border);
+      color: var(--text-main);
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 0.95rem;
+      transition: var(--transition);
+    }
+    .btn-opt-action:hover:not(:disabled) {
+      background: rgba(50, 217, 255, 0.15);
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+    .btn-opt-action:disabled {
+      opacity: 0.25;
+      cursor: not-allowed;
+    }
+    .btn-opt-action.delete:hover {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: #EF4444;
+      color: #F87171;
+    }
+
+    .smart-chip {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--glass-border);
+      color: var(--text-muted);
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      user-select: none;
+      transition: var(--transition);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .smart-chip:hover {
+      border-color: var(--cyan);
+      color: var(--text-main);
+    }
+    .smart-chip.active {
+      background: rgba(50, 217, 255, 0.15);
+      border-color: var(--cyan);
+      color: var(--cyan);
+      font-weight: 600;
+    }
+
+    /* Modal styling for smartlist */
+    .smart-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(4, 10, 20, 0.82);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    .smart-modal-backdrop.open {
+      display: flex;
+    }
+    .smart-modal-card {
+      background: var(--bg-dark-surface);
+      border: 1px solid var(--glass-border-luminous);
+      border-radius: var(--radius-lg);
+      width: 100%;
+      max-width: 760px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+      overflow: hidden;
+      animation: modalFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    /* Print styling specifically for preference list */
+    @media print {
+      body {
+        background: #fff !important;
+        color: #000 !important;
+      }
+      .app-nav, .mobile-nav-panel, .site-footer, #smartlist-form-container, .smart-opt-actions, .smart-toolbar-btns, .theme-toggle, .disclaimer-banner {
+        display: none !important;
+      }
+      .page-section {
+        display: none !important;
+      }
+      #page-smartlist {
+        display: block !important;
+      }
+      .smart-option-card {
+        border: 1px solid #ccc !important;
+        background: #fff !important;
+        color: #000 !important;
+        box-shadow: none !important;
+        page-break-inside: avoid;
+        margin-bottom: 6px !important;
+        padding: 8px 12px !important;
+      }
+      .smart-opt-num {
+        background: #eee !important;
+        color: #000 !important;
+        border: 1px solid #999 !important;
+      }
+      .smart-opt-title {
+        color: #000 !important;
+      }
+      .smart-opt-sub {
+        color: #444 !important;
+      }
+      .smart-badge-dream, .smart-badge-target, .smart-badge-safe {
+        border: 1px solid #666 !important;
+        color: #000 !important;
+        background: #eee !important;
+      }
+    }
+
+</style>
 </head>
 <body>
 
@@ -1461,6 +2331,7 @@
       <div class="nav-links">
         <a class="nav-link active" data-page="home" onclick="navigateTo('home')">Home</a>
         <a class="nav-link" data-page="predictor" onclick="navigateTo('predictor')">College Predictor</a>
+        <a class="nav-link" data-page="smartlist" onclick="navigateTo('smartlist')">Smart CAP List</a>
         <a class="nav-link" data-page="explore" onclick="navigateTo('explore')">Explore Colleges</a>
         <a class="nav-link" data-page="compare" onclick="navigateTo('compare')">Compare</a>
         <a class="nav-link" data-page="cutoffs" onclick="navigateTo('cutoffs')">CAP Cutoffs</a>
@@ -1486,6 +2357,7 @@
   <div class="mobile-nav-panel" id="mobile-nav">
     <a class="nav-link" onclick="navigateTo('home'); toggleMobileNav();">🏠 Home</a>
     <a class="nav-link" onclick="navigateTo('predictor'); toggleMobileNav();">🎯 College Predictor</a>
+    <a class="nav-link" onclick="navigateTo('smartlist'); toggleMobileNav();">📝 Smart CAP List</a>
     <a class="nav-link" onclick="navigateTo('explore'); toggleMobileNav();">🔍 Explore Colleges</a>
     <a class="nav-link" onclick="navigateTo('compare'); toggleMobileNav();">⚖️ Compare Colleges</a>
     <a class="nav-link" onclick="navigateTo('cutoffs'); toggleMobileNav();">📊 CAP Cutoffs Browser</a>
@@ -2182,7 +3054,268 @@
       </div>
     </section>
 
-  </main>
+  
+    <!-- =========================================================
+         PAGE: SMART CAP OPTION FILLING LIST GENERATOR
+         ========================================================= -->
+    <section id="page-smartlist" class="page-section">
+      <div style="margin-bottom: 2rem;">
+        <div style="display: inline-flex; align-items: center; gap: 0.5rem; background: rgba(50, 217, 255, 0.1); border: 1px solid rgba(50, 217, 255, 0.3); border-radius: 9999px; padding: 0.3rem 0.85rem; font-size: 0.8rem; color: var(--cyan); margin-bottom: 0.75rem; font-weight: 600;">
+          <span>🎯 Official MHT-CET Choice Filing Strategy</span>
+        </div>
+        <h1 style="font-size: 2.25rem; margin-bottom: 0.5rem; background: linear-gradient(135deg, #FFF, #32D9FF); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+          Smart CAP Option Filling
+        </h1>
+        <p style="color: var(--text-muted); font-size: 1.05rem; max-width: 860px; line-height: 1.5;">
+          Generate your personalized MHT-CET CAP preference list of 25–30 colleges based on your percentile, category, preferred branches, and admission chances.
+        </p>
+      </div>
+
+      <!-- FORM CONTAINER -->
+      <div id="smartlist-form-container" class="glass-card" style="padding: 1.75rem 2rem; margin-bottom: 2.5rem;">
+        <h3 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 1.25rem; display: flex; align-items: center; gap: 0.6rem;">
+          <span>⚙️ Step 1: Configure Your Admission Profile</span>
+        </h3>
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 1.5rem;">
+          <!-- Percentile -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              MHT-CET Percentile <span style="color: #F87171;">*</span>
+            </label>
+            <input type="number" id="smart-percentile" min="0" max="100" step="0.01" placeholder="e.g. 96.45" class="glass-input" style="width: 100%; font-size: 1.05rem; font-weight: 700;" value="95.00">
+            <div id="smart-pct-error" style="color: #F87171; font-size: 0.78rem; margin-top: 0.35rem; display: none;">
+              Please enter a valid percentile between 0.00 and 100.00.
+            </div>
+            <!-- Quick Percentile Buttons -->
+            <div style="display: flex; gap: 0.35rem; margin-top: 0.5rem; flex-wrap: wrap;">
+              <span style="font-size: 0.75rem; color: var(--text-dim); margin-right: 0.2rem; align-self: center;">Quick:</span>
+              <button type="button" class="smart-chip" onclick="document.getElementById('smart-percentile').value='99.00'">99%</button>
+              <button type="button" class="smart-chip" onclick="document.getElementById('smart-percentile').value='95.00'">95%</button>
+              <button type="button" class="smart-chip" onclick="document.getElementById('smart-percentile').value='90.00'">90%</button>
+              <button type="button" class="smart-chip" onclick="document.getElementById('smart-percentile').value='85.00'">85%</button>
+              <button type="button" class="smart-chip" onclick="document.getElementById('smart-percentile').value='75.00'">75%</button>
+            </div>
+          </div>
+
+          <!-- Category -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Candidate Category
+            </label>
+            <select id="smart-category" class="glass-input" style="width: 100%;">
+              <option value="OPEN" selected>OPEN (General / Unreserved)</option>
+              <option value="OBC">OBC (Other Backward Classes)</option>
+              <option value="SC">SC (Scheduled Caste)</option>
+              <option value="ST">ST (Scheduled Tribe)</option>
+              <option value="EWS">EWS (Economically Weaker Section)</option>
+              <option value="VJ">VJ / DT (Vimukta Jati)</option>
+              <option value="NT1">NT-1 / NT-B</option>
+              <option value="NT2">NT-2 / NT-C</option>
+              <option value="NT3">NT-3 / NT-D</option>
+              <option value="SEBC">SEBC (Socially &amp; Educationally Backward)</option>
+              <option value="TFWS">TFWS (Tuition Fee Waiver Scheme)</option>
+            </select>
+          </div>
+
+          <!-- Gender / Quota -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Seat Quota / Gender
+            </label>
+            <select id="smart-gender" class="glass-input" style="width: 100%;">
+              <option value="any" selected>General Quota (G / All Seats)</option>
+              <option value="L">Ladies Quota (L / 30% Women Reservation)</option>
+            </select>
+          </div>
+
+          <!-- CAP Round Basis -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Benchmark CAP Round
+            </label>
+            <select id="smart-round" class="glass-input" style="width: 100%;">
+              <option value="CAP3" selected>CAP Round 3 (Most realistic final cutoffs)</option>
+              <option value="CAP2">CAP Round 2</option>
+              <option value="CAP1">CAP Round 1</option>
+              <option value="any">Any Round (Best Reference)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Preferred Branches Multi-Select -->
+        <div style="margin-bottom: 1.5rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; flex-wrap: wrap; gap: 0.5rem;">
+            <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">
+              Preferred Engineering Branches <span style="font-size: 0.78rem; color: var(--cyan);">(Multiple Allowed)</span>
+            </label>
+            <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
+              <button type="button" class="smart-chip" onclick="smartSelectBranchPreset('tech')">💻 All Tech / CS / IT</button>
+              <button type="button" class="smart-chip" onclick="smartSelectBranchPreset('circuital')">⚡ Circuital</button>
+              <button type="button" class="smart-chip" onclick="smartSelectBranchPreset('core')">⚙️ Core</button>
+              <button type="button" class="smart-chip" onclick="smartSelectBranchPreset('all')">Select All</button>
+              <button type="button" class="smart-chip" onclick="smartSelectBranchPreset('clear')">Clear</button>
+            </div>
+          </div>
+          <div id="smart-branch-chips-container" style="display: flex; flex-wrap: wrap; gap: 0.45rem; max-height: 140px; overflow-y: auto; padding: 0.6rem; background: rgba(0,0,0,0.2); border-radius: var(--radius-sm); border: 1px solid var(--glass-border);">
+            <!-- Populated dynamically via JS -->
+          </div>
+        </div>
+
+        <!-- Optional District, Type, Dream College Filters -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 1.5rem;">
+          <!-- Preferred Location / District -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Preferred Location / District
+            </label>
+            <select id="smart-district" class="glass-input" style="width: 100%;">
+              <option value="all" selected>All Maharashtra (Recommended)</option>
+              <option value="Pune">Pune District</option>
+              <option value="Mumbai">Mumbai / Suburban</option>
+              <option value="Thane">Thane &amp; Navi Mumbai</option>
+              <option value="Nagpur">Nagpur</option>
+              <option value="Nashik">Nashik</option>
+              <option value="Aurangabad">Chhatrapati Sambhajinagar</option>
+              <option value="Kolhapur">Kolhapur</option>
+              <option value="Amravati">Amravati</option>
+              <option value="Solapur">Solapur</option>
+              <option value="Sangli">Sangli</option>
+            </select>
+          </div>
+
+          <!-- College Type -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Institute Type Preference
+            </label>
+            <select id="smart-type" class="glass-input" style="width: 100%;">
+              <option value="all" selected>All Institute Types</option>
+              <option value="Government">Government / Govt-Aided Only</option>
+              <option value="Unaided">Private / Unaided Only</option>
+            </select>
+          </div>
+
+          <!-- Optional Dream College -->
+          <div>
+            <label style="display: block; font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.5rem;">
+              Optional Dream College <span style="font-size: 0.75rem; color: var(--text-dim);">(Pins to Option #1)</span>
+            </label>
+            <select id="smart-dream-college" class="glass-input" style="width: 100%;">
+              <option value="none" selected>None (Auto-pick top dream colleges)</option>
+              <!-- Filled via JS with 379 colleges -->
+            </select>
+          </div>
+        </div>
+
+        <!-- GENERATE BUTTON -->
+        <div style="display: flex; gap: 1rem; align-items: center; justify-content: flex-end; flex-wrap: wrap;">
+          <button type="button" onclick="executeSmartCAPGenerator()" class="glow-button" style="padding: 0.85rem 2rem; font-size: 1.05rem; font-weight: 700; display: inline-flex; align-items: center; gap: 0.6rem;">
+            <span>⚡ Generate 25–30 Smart CAP Options</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- RESULTS CONTAINER -->
+      <div id="smartlist-results-container" style="display: none;">
+        <!-- STATS & SUMMARY BAR -->
+        <div class="glass-card" style="padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+          <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+            <div>
+              <span style="font-size: 0.85rem; color: var(--text-muted);">Generated Preference List:</span>
+              <div style="font-size: 1.4rem; font-weight: 800; color: var(--text-main);" id="smart-total-count">28 Options</div>
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <span class="smart-badge-dream" id="smart-badge-dream-count">🌟 6 Dream</span>
+              <span class="smart-badge-target" id="smart-badge-target-count">🎯 12 Target</span>
+              <span class="smart-badge-safe" id="smart-badge-safe-count">🛡️ 10 Safe</span>
+            </div>
+          </div>
+
+          <!-- ACTION BUTTONS -->
+          <div class="smart-toolbar-btns" style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+            <button type="button" class="btn-opt-action" style="width: auto; padding: 0 0.85rem; font-size: 0.85rem; gap: 0.35rem;" onclick="openAddSmartModal()">
+              <span>➕ Add College</span>
+            </button>
+            <button type="button" class="btn-opt-action" style="width: auto; padding: 0 0.85rem; font-size: 0.85rem; gap: 0.35rem;" onclick="resetSmartOrder()">
+              <span>🔄 Reset Order</span>
+            </button>
+            <button type="button" class="btn-opt-action" style="width: auto; padding: 0 0.85rem; font-size: 0.85rem; gap: 0.35rem;" onclick="executeSmartCAPGenerator()">
+              <span>⚡ Re-generate</span>
+            </button>
+            <button type="button" class="btn-opt-action" style="width: auto; padding: 0 0.85rem; font-size: 0.85rem; gap: 0.35rem; color: var(--cyan); border-color: rgba(50, 217, 255, 0.4);" onclick="exportSmartListCSV()">
+              <span>📥 Export CSV</span>
+            </button>
+            <button type="button" class="btn-opt-action" style="width: auto; padding: 0 0.85rem; font-size: 0.85rem; gap: 0.35rem; background: var(--royal); border-color: var(--royal); color: #fff;" onclick="printSmartListPDF()">
+              <span>🖨️ Print / Save PDF</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- HINT CALLOUT -->
+        <div style="background: rgba(36, 87, 255, 0.08); border: 1px solid rgba(50, 217, 255, 0.25); border-radius: var(--radius-md); padding: 0.75rem 1.25rem; margin-bottom: 1.25rem; font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.6rem;">
+          <span>💡</span>
+          <span>
+            <strong>Pro Strategy:</strong> The CET Cell allocates seats in order of preference. Keep aspirational <strong>Dream</strong> colleges at the top (#1–#7), highly probable <strong>Target</strong> colleges in the middle (#8–#19), and guaranteed <strong>Safe</strong> backups at the bottom (#20–#30). Use the ⬆️/⬇️ buttons to fine-tune your priority order.
+          </span>
+        </div>
+
+        <!-- LIST CONTAINER -->
+        <div id="smart-options-list">
+          <!-- Cards rendered dynamically -->
+        </div>
+
+        <!-- ADVISORY & DISCLAIMER NOTICE -->
+        <div class="glass-card" style="padding: 1.5rem; margin-top: 2rem; border-left: 4px solid var(--cyan);">
+          <h4 style="font-size: 1rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--text-main);">
+            ℹ️ Official CAP Option Filling Advisory
+          </h4>
+          <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 0.5rem;">
+            1. <strong>Verification of DTE Choice Codes:</strong> Every engineering branch has a unique 9-digit choice code (e.g. 600624510 for COEP Computer Engineering). Ensure you verify choice codes on the official portal <a href="https://cetcell.mahacet.org/" target="_blank" rel="noopener" style="color: var(--cyan); text-decoration: underline;">cetcell.mahacet.org</a> before final confirmation.
+          </p>
+          <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 0.5rem;">
+            2. <strong>Annual Cutoff Fluctuations:</strong> Dream, Target, and Safe classifications are statistical models derived from previous year MHT-CET CAP Round cutoffs. Real-world cutoffs vary annually based on test taker counts and branch popularity.
+          </p>
+          <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 0;">
+            3. <strong>Seat Acceptance Rules:</strong> If Option #1 is allotted in Round 1, it is an auto-freeze (mandatory acceptance). Do not place any college at #1 unless you are 100% willing to take admission there.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- REPLACE / ADD COLLEGE MODAL -->
+    <div id="smart-modal-backdrop" class="smart-modal-backdrop" onclick="if(event.target === this) closeSmartModal();">
+      <div class="smart-modal-card">
+        <div style="padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--glass-border); display: flex; align-items: center; justify-content: space-between;">
+          <h3 id="smart-modal-title" style="font-size: 1.15rem; font-weight: 700; color: var(--text-main); margin: 0;">
+            Replace College Option
+          </h3>
+          <button type="button" class="btn-opt-action" onclick="closeSmartModal()" style="border: none; background: transparent; font-size: 1.25rem;">✕</button>
+        </div>
+        
+        <div style="padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--glass-border);">
+          <div style="display: flex; gap: 0.75rem;">
+            <input type="text" id="smart-modal-search" placeholder="Search by college name, city, or branch..." class="glass-input" style="flex: 1;" oninput="filterSmartModalOptions()">
+            <select id="smart-modal-filter-tier" class="glass-input" style="width: 140px;" onchange="filterSmartModalOptions()">
+              <option value="all">All Tiers</option>
+              <option value="dream">Dream Only</option>
+              <option value="target">Target Only</option>
+              <option value="safe">Safe Only</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="smart-modal-list" style="padding: 1rem 1.5rem; overflow-y: auto; flex: 1; min-height: 250px; max-height: 500px;">
+          <!-- Options rendered dynamically -->
+        </div>
+
+        <div style="padding: 0.85rem 1.5rem; border-top: 1px solid var(--glass-border); display: flex; justify-content: flex-end;">
+          <button type="button" class="smart-chip" onclick="closeSmartModal()" style="padding: 0.5rem 1.25rem;">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+</main>
 
   <!-- =========================================================
        FOOTER
@@ -2294,6 +3427,7 @@ const CAT_LABELS = {OPEN:'Open',SC:'SC',ST:'ST',VJ:'VJ (DT-A)',NT1:'NT1 (DT-B)',
     // Initialize application on DOM ready
     window.addEventListener('DOMContentLoaded', () => {
       initDataIndexes();
+      initSmartListUI();
       initUISelectOptions();
       initTheme();
       handleHashRouting();
@@ -2305,6 +3439,10 @@ const CAT_LABELS = {OPEN:'Open',SC:'SC',ST:'ST',VJ:'VJ (DT-A)',NT1:'NT1 (DT-B)',
 
     function handleHashRouting() {
       const hash = window.location.hash.replace('#', '') || 'home';
+      if (hash === 'smartlist') {
+        navigateTo('smartlist', false);
+        return;
+      }
       if (hash.startsWith('college/')) {
         const collegeCode = hash.split('/')[1];
         showCollegeDetailPage(collegeCode);
@@ -2314,7 +3452,7 @@ const CAT_LABELS = {OPEN:'Open',SC:'SC',ST:'ST',VJ:'VJ (DT-A)',NT1:'NT1 (DT-B)',
     }
 
     function navigateTo(pageId, updateHash = true) {
-      const pages = ['home', 'predictor', 'explore', 'college', 'compare', 'cutoffs', 'guide', 'about'];
+      const pages = ['home', 'predictor', 'smartlist', 'explore', 'college', 'compare', 'cutoffs', 'guide', 'about'];
       if (!pages.includes(pageId)) pageId = 'home';
 
       pages.forEach(p => {
