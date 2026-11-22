@@ -8,634 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js">
-    /* =========================================================
-       SMART CAP OPTION FILLING LIST GENERATOR LOGIC
-       ========================================================= */
-    let smartListState = [];
-    let smartListOriginal = [];
-    let smartActiveModalTargetIndex = null; // null for Add, number for Replace
-    let smartSelectedBranches = new Set();
-
-    // Top tech branch keywords for quick preset
-    const TECH_BRANCH_KEYWORDS = ['computer', 'information technology', 'artificial intelligence', 'data science', 'cyber', 'software', 'machine learning'];
-    const CIRCUITAL_BRANCH_KEYWORDS = ['electronics', 'telecommunication', 'electrical', 'instrumentation'];
-    const CORE_BRANCH_KEYWORDS = ['mechanical', 'civil', 'chemical', 'automobile', 'production', 'aerospace', 'metallurgy'];
-
-    // Initialize UI options for Smart List
-    function initSmartListUI() {
-      // Populate dream college dropdown
-      const dreamSelect = document.getElementById('smart-dream-college');
-      if (dreamSelect && dreamSelect.options.length <= 1) {
-        DATA.institutes.slice().sort((a, b) => a[1].localeCompare(b[1])).forEach(inst => {
-          const opt = document.createElement('option');
-          opt.value = inst[0];
-          opt.textContent = `${inst[0]} - ${inst[1]} (${inst[3] || 'MH'})`;
-          dreamSelect.appendChild(opt);
-        });
-      }
-
-      // Populate branch chips
-      const chipsContainer = document.getElementById('smart-branch-chips-container');
-      if (chipsContainer && chipsContainer.children.length === 0) {
-        // Collect sorted unique branches
-        UNIQUE_BRANCHES.slice().sort().forEach(br => {
-          const chip = document.createElement('div');
-          chip.className = 'smart-chip';
-          chip.dataset.branch = br;
-          chip.textContent = br;
-          chip.onclick = () => toggleSmartBranchChip(br, chip);
-          chipsContainer.appendChild(chip);
-        });
-
-        // Default: activate Tech branches
-        smartSelectBranchPreset('tech');
-      }
-    }
-
-    function toggleSmartBranchChip(branchName, chipEl) {
-      if (smartSelectedBranches.has(branchName)) {
-        smartSelectedBranches.delete(branchName);
-        chipEl.classList.remove('active');
-      } else {
-        smartSelectedBranches.add(branchName);
-        chipEl.classList.add('active');
-      }
-    }
-
-    function smartSelectBranchPreset(preset) {
-      const chips = document.querySelectorAll('#smart-branch-chips-container .smart-chip');
-      smartSelectedBranches.clear();
-
-      chips.forEach(chip => {
-        const br = chip.dataset.branch.toLowerCase();
-        let match = false;
-
-        if (preset === 'tech') {
-          match = TECH_BRANCH_KEYWORDS.some(k => br.includes(k));
-        } else if (preset === 'circuital') {
-          match = CIRCUITAL_BRANCH_KEYWORDS.some(k => br.includes(k));
-        } else if (preset === 'core') {
-          match = CORE_BRANCH_KEYWORDS.some(k => br.includes(k));
-        } else if (preset === 'all') {
-          match = true;
-        } else if (preset === 'clear') {
-          match = false;
-        }
-
-        if (match) {
-          smartSelectedBranches.add(chip.dataset.branch);
-          chip.classList.add('active');
-        } else {
-          chip.classList.remove('active');
-        }
-      });
-
-      if (preset !== 'clear' && smartSelectedBranches.size === 0) {
-        // Fallback: select first 5
-        chips.forEach((c, idx) => {
-          if (idx < 5) {
-            smartSelectedBranches.add(c.dataset.branch);
-            c.classList.add('active');
-          }
-        });
-      }
-    }
-
-    function isMatchingSeat(seatCode, prefCat, prefGender) {
-      if (prefCat === 'TFWS') return seatCode === 'TFWS';
-      if (prefCat === 'EWS') return seatCode === 'EWS';
-      if (!seatCode.includes(prefCat)) return false;
-      if (prefGender === 'L') {
-        return seatCode.startsWith('L') || seatCode.startsWith('G') || seatCode === prefCat;
-      } else if (prefGender === 'G') {
-        return seatCode.startsWith('G') || seatCode === prefCat;
-      }
-      return true;
-    }
-
-    // Recommendation Engine: Generates balanced 25-30 options
-    function executeSmartCAPGenerator() {
-      const pctInput = document.getElementById('smart-percentile');
-      const pctVal = parseFloat(pctInput.value);
-      const errorEl = document.getElementById('smart-pct-error');
-
-      if (isNaN(pctVal) || pctVal < 0 || pctVal > 100) {
-        errorEl.style.display = 'block';
-        pctInput.focus();
-        return;
-      }
-      errorEl.style.display = 'none';
-
-      const prefCat = document.getElementById('smart-category').value;
-      const prefGender = document.getElementById('smart-gender').value;
-      const prefRound = document.getElementById('smart-round').value;
-      const prefDistrict = document.getElementById('smart-district').value;
-      const prefType = document.getElementById('smart-type').value;
-      const dreamCode = document.getElementById('smart-dream-college').value;
-
-      // Ensure at least one branch selected
-      if (smartSelectedBranches.size === 0) {
-        showToast("Selecting All Tech Branches by default.");
-        smartSelectBranchPreset('tech');
-      }
-
-      const roundPriority = { 'CAP3': 3, 'CAP2': 2, 'CAP1': 1 };
-      const maxAllowedRound = prefRound === 'CAP1' ? 1 : (prefRound === 'CAP2' ? 2 : 3);
-
-      // Filter and evaluate cutoffs strictly from dataset
-      const eligibleMap = new Map(); // Key: `${instCode}_${branchName}`, Value: best candidate
-
-      DATA.cutoffs.forEach(c => {
-        const branchIdx = c[0];
-        const seatCode = c[1];
-        const round = c[2];
-        const cutoffPct = c[3];
-        const closingRank = c[4];
-
-        // Check Round filter with intelligent fallback (e.g. if CAP3 picked, allow latest round up to CAP3)
-        const rWeight = roundPriority[round] || 1;
-        if (prefRound !== 'any' && rWeight > maxAllowedRound) return;
-
-        // Check Category & Gender Seat Quota
-        if (!isMatchingSeat(seatCode, prefCat, prefGender)) return;
-
-        // Branch matching
-        const branchName = BRANCH_MAP[branchIdx];
-        if (!smartSelectedBranches.has(branchName)) return;
-
-        // Institute & Location filtering
-        const branchData = DATA.branches[branchIdx];
-        const instIdx = branchData[1];
-        const inst = DATA.institutes[instIdx];
-        const instCode = inst[0];
-        const instName = inst[1];
-        const instType = inst[2];
-        const city = inst[3] || 'Maharashtra';
-
-        if (prefDistrict !== 'all' && city !== prefDistrict) return;
-        if (prefType !== 'all') {
-          if (prefType === 'Government' && !instType.toLowerCase().includes('govt') && !instType.toLowerCase().includes('government')) return;
-          if (prefType === 'Unaided' && (instType.toLowerCase().includes('govt') || instType.toLowerCase().includes('government'))) return;
-        }
-
-        // Calculate diff: student percentile minus cutoff
-        const diff = pctVal - cutoffPct;
-
-        // Candidate classification:
-        // Dream: cutoffPct > pctVal (aspirational)
-        // Target: pctVal - 3.5 <= cutoffPct <= pctVal
-        // Safe: pctVal - 14.0 <= cutoffPct < pctVal - 3.5
-        let tier = 'safe';
-        if (cutoffPct > pctVal) {
-          tier = 'dream';
-        } else if (diff <= 3.5) {
-          tier = 'target';
-        } else {
-          tier = 'safe';
-        }
-
-        const key = `${instCode}_${branchName}`;
-        const existing = eligibleMap.get(key);
-
-        // Keep latest round, and within same round highest cutoff record
-        const existingRWeight = existing ? (roundPriority[existing.round] || 0) : -1;
-        if (!existing || rWeight > existingRWeight || (rWeight === existingRWeight && cutoffPct > existing.cutoffPercentile)) {
-          eligibleMap.set(key, {
-            instCode: instCode,
-            instName: instName,
-            instType: instType,
-            city: city,
-            branchName: branchName,
-            branchCode: branchData[0],
-            seatCode: seatCode,
-            round: round,
-            cutoffPercentile: cutoffPct,
-            closingRank: closingRank,
-            diff: diff,
-            tier: tier
-          });
-        }
-      });
-
-      const allEligible = Array.from(eligibleMap.values());
-
-      // If dream college specified, ensure its top branch is extracted and pinned
-      let pinnedDreamOption = null;
-      if (dreamCode !== 'none') {
-        const dreamMatches = allEligible.filter(item => item.instCode === dreamCode);
-        if (dreamMatches.length > 0) {
-          dreamMatches.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
-          pinnedDreamOption = dreamMatches[0];
-          pinnedDreamOption.tier = 'dream';
-          pinnedDreamOption.isPinned = true;
-        } else {
-          // Fallback search across all branches for this dream college
-          const dreamFallbacks = [];
-          DATA.cutoffs.forEach(c => {
-            const bIdx = c[0];
-            const bData = DATA.branches[bIdx];
-            const iIdx = bData[1];
-            const inst = DATA.institutes[iIdx];
-            if (inst[0] === dreamCode && isMatchingSeat(c[1], prefCat, prefGender)) {
-              dreamFallbacks.push({
-                instCode: inst[0],
-                instName: inst[1],
-                instType: inst[2],
-                city: inst[3] || 'Maharashtra',
-                branchName: BRANCH_MAP[bIdx],
-                branchCode: bData[0],
-                seatCode: c[1],
-                round: c[2],
-                cutoffPercentile: c[3],
-                closingRank: c[4],
-                diff: pctVal - c[3],
-                tier: 'dream',
-                isPinned: true
-              });
-            }
-          });
-          if (dreamFallbacks.length > 0) {
-            dreamFallbacks.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
-            pinnedDreamOption = dreamFallbacks[0];
-          }
-        }
-      }
-
-      // Group into tiers
-      const dreamPool = allEligible.filter(item => item.tier === 'dream' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
-      const targetPool = allEligible.filter(item => item.tier === 'target' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
-      const safePool = allEligible.filter(item => item.tier === 'safe' && (!pinnedDreamOption || item.instCode !== pinnedDreamOption.instCode || item.branchName !== pinnedDreamOption.branchName));
-
-      // Sort pools
-      // Dream: highest cutoff first (aspirational top colleges)
-      dreamPool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
-      // Target: closest to student's percentile first
-      targetPool.sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff));
-      // Safe: comfortable cutoffs descending
-      safePool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
-
-      // Select target counts: Dream 6-8, Target 11-12, Safe 9-10 (total ~28)
-      const targetDreamCount = pinnedDreamOption ? 6 : 7;
-      const targetTargetCount = 12;
-      const targetSafeCount = 9;
-
-      const selectedList = [];
-
-      // Add pinned dream option first if available
-      if (pinnedDreamOption) {
-        selectedList.push(pinnedDreamOption);
-      }
-
-      // Add Dream options
-      const selectedDream = dreamPool.slice(0, targetDreamCount);
-      selectedList.push(...selectedDream);
-
-      // Add Target options
-      const selectedTarget = targetPool.slice(0, targetTargetCount);
-      selectedList.push(...selectedTarget);
-
-      // Add Safe options
-      const selectedSafe = safePool.slice(0, targetSafeCount);
-      selectedList.push(...selectedSafe);
-
-      // If user had narrow filters and total is less than 25, pull remaining from any eligible
-      if (selectedList.length < 25 && allEligible.length > selectedList.length) {
-        const currentKeys = new Set(selectedList.map(item => `${item.instCode}_${item.branchName}`));
-        for (const item of allEligible) {
-          const key = `${item.instCode}_${item.branchName}`;
-          if (!currentKeys.has(key)) {
-            selectedList.push(item);
-            currentKeys.add(key);
-            if (selectedList.length >= 28) break;
-          }
-        }
-      }
-
-      // Save snapshots
-      smartListState = selectedList.map((item, idx) => ({ ...item, optionNum: idx + 1 }));
-      smartListOriginal = JSON.parse(JSON.stringify(smartListState));
-
-      // Render the results
-      renderSmartList();
-
-      const resultsContainer = document.getElementById('smartlist-results-container');
-      resultsContainer.style.display = 'block';
-      resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-      showToast(`Smart CAP preference list generated with ${smartListState.length} colleges.`);
-    }
-
-    // Render option cards
-    function renderSmartList() {
-      const listContainer = document.getElementById('smart-options-list');
-      if (!listContainer) return;
-
-      listContainer.innerHTML = '';
-
-      let dreamCount = 0;
-      let targetCount = 0;
-      let safeCount = 0;
-
-      smartListState.forEach((item, idx) => {
-        item.optionNum = idx + 1;
-        if (item.tier === 'dream') dreamCount++;
-        else if (item.tier === 'target') targetCount++;
-        else safeCount++;
-
-        const card = document.createElement('div');
-        card.className = `smart-option-card tier-${item.tier}`;
-        card.id = `smart-opt-card-${idx}`;
-
-        let tierBadgeHtml = '';
-        if (item.tier === 'dream') {
-          tierBadgeHtml = `<span class="smart-badge-dream">${item.isPinned ? '📌 Designated Dream' : '🌟 Dream'}</span>`;
-        } else if (item.tier === 'target') {
-          tierBadgeHtml = `<span class="smart-badge-target">🎯 Target</span>`;
-        } else {
-          tierBadgeHtml = `<span class="smart-badge-safe">🛡️ Safe</span>`;
-        }
-
-        const isFirst = idx === 0;
-        const isLast = idx === smartListState.length - 1;
-
-        const cutoffLabel = item.cutoffPercentile ? `${item.cutoffPercentile.toFixed(2)} %ile` : 'N/A';
-        const rankLabel = item.closingRank ? `Rank ${item.closingRank.toLocaleString()}` : '';
-
-        card.innerHTML = `
-          <div class="smart-opt-num">#${item.optionNum}</div>
-          <div class="smart-opt-body">
-            <div class="smart-opt-title">
-              <a href="#college/${item.instCode}" onclick="showCollegeDetailPage('${item.instCode}')" style="color: var(--text-main); text-decoration: none; hover: text-decoration: underline;">
-                ${item.instName}
-              </a>
-              <span style="font-size: 0.78rem; color: var(--text-dim); font-weight: 500;">[Code: ${item.instCode}]</span>
-              ${tierBadgeHtml}
-            </div>
-            <div class="smart-opt-sub">
-              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${item.branchName}</span></span>
-              <span><strong>City:</strong> ${item.city}</span>
-              <span><strong>Cutoff:</strong> ${cutoffLabel}</span>
-              ${rankLabel ? `<span><strong>Closing:</strong> ${rankLabel}</span>` : ''}
-              <span><strong>Quota:</strong> ${item.seatCode || 'General'}</span>
-            </div>
-          </div>
-          <div class="smart-opt-actions">
-            <button type="button" class="btn-opt-action" title="Move Up" onclick="moveSmartOption(${idx}, -1)" ${isFirst ? 'disabled' : ''}>⬆️</button>
-            <button type="button" class="btn-opt-action" title="Move Down" onclick="moveSmartOption(${idx}, 1)" ${isLast ? 'disabled' : ''}>⬇️</button>
-            <button type="button" class="btn-opt-action" title="Replace with Alternative" onclick="openReplaceSmartModal(${idx})">🔄</button>
-            <button type="button" class="btn-opt-action delete" title="Remove Option" onclick="removeSmartOption(${idx})">✕</button>
-          </div>
-        `;
-
-        listContainer.appendChild(card);
-      });
-
-      // Update counters
-      document.getElementById('smart-total-count').textContent = `${smartListState.length} Options`;
-      document.getElementById('smart-badge-dream-count').textContent = `🌟 ${dreamCount} Dream`;
-      document.getElementById('smart-badge-target-count').textContent = `🎯 ${targetCount} Target`;
-      document.getElementById('smart-badge-safe-count').textContent = `🛡️ ${safeCount} Safe`;
-    }
-
-    // Move option up or down
-    function moveSmartOption(index, direction) {
-      const targetIndex = index + direction;
-      if (targetIndex < 0 || targetIndex >= smartListState.length) return;
-
-      const temp = smartListState[index];
-      smartListState[index] = smartListState[targetIndex];
-      smartListState[targetIndex] = temp;
-
-      renderSmartList();
-      showToast(`Moved option to #${targetIndex + 1}`);
-    }
-
-    // Remove option
-    function removeSmartOption(index) {
-      const removed = smartListState.splice(index, 1)[0];
-      renderSmartList();
-      showToast(`Removed #${index + 1}: ${removed.instName.slice(0, 24)}...`);
-    }
-
-    // Reset list order to original recommendation
-    function resetSmartOrder() {
-      if (!smartListOriginal.length) return;
-      smartListState = JSON.parse(JSON.stringify(smartListOriginal));
-      renderSmartList();
-      showToast("Preference list order restored to algorithmic recommendation.");
-    }
-
-    // Modal Handling for Replace & Add
-    function openReplaceSmartModal(index) {
-      smartActiveModalTargetIndex = index;
-      const targetItem = smartListState[index];
-      document.getElementById('smart-modal-title').textContent = `Replace Option #${index + 1} (${targetItem.branchName.slice(0, 30)}...)`;
-      document.getElementById('smart-modal-search').value = '';
-      document.getElementById('smart-modal-filter-tier').value = targetItem.tier || 'all';
-
-      populateSmartModalCandidates(targetItem);
-      document.getElementById('smart-modal-backdrop').classList.add('open');
-    }
-
-    function openAddSmartModal() {
-      smartActiveModalTargetIndex = null;
-      document.getElementById('smart-modal-title').textContent = "Add College Option to Preference List";
-      document.getElementById('smart-modal-search').value = '';
-      document.getElementById('smart-modal-filter-tier').value = 'all';
-
-      populateSmartModalCandidates(null);
-      document.getElementById('smart-modal-backdrop').classList.add('open');
-    }
-
-    function closeSmartModal() {
-      document.getElementById('smart-modal-backdrop').classList.remove('open');
-    }
-
-    let currentModalCandidates = [];
-
-    function populateSmartModalCandidates(referenceItem) {
-      const pctInput = document.getElementById('smart-percentile');
-      const studentPct = parseFloat(pctInput.value) || 95.0;
-      const existingKeys = new Set(smartListState.map(item => `${item.instCode}_${item.branchName}`));
-
-      const listContainer = document.getElementById('smart-modal-list');
-      listContainer.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading candidates from verified cutoffs...</div>';
-
-      // Build candidate list from cutoffs
-      const candidates = [];
-      const seen = new Set();
-
-      DATA.cutoffs.forEach(c => {
-        const branchIdx = c[0];
-        const seatCode = c[1];
-        const round = c[2];
-        const cutoffPct = c[3];
-        const closingRank = c[4];
-
-        const branchData = DATA.branches[branchIdx];
-        const instIdx = branchData[1];
-        const inst = DATA.institutes[instIdx];
-        const instCode = inst[0];
-        const branchName = BRANCH_MAP[branchIdx];
-
-        const key = `${instCode}_${branchName}`;
-        if (existingKeys.has(key) || seen.has(key)) return;
-
-        let tier = 'safe';
-        if (cutoffPct > studentPct) tier = 'dream';
-        else if (studentPct - cutoffPct <= 3.5) tier = 'target';
-        else tier = 'safe';
-
-        seen.add(key);
-        candidates.push({
-          instCode: instCode,
-          instName: inst[1],
-          instType: inst[2],
-          city: inst[3] || 'Maharashtra',
-          branchName: branchName,
-          seatCode: seatCode,
-          round: round,
-          cutoffPercentile: cutoffPct,
-          closingRank: closingRank,
-          tier: tier
-        });
-      });
-
-      // Sort: if reference item provided, prioritize same branch & similar tier
-      if (referenceItem) {
-        candidates.sort((a, b) => {
-          const aBranchMatch = a.branchName === referenceItem.branchName ? 1 : 0;
-          const bBranchMatch = b.branchName === referenceItem.branchName ? 1 : 0;
-          if (aBranchMatch !== bBranchMatch) return bBranchMatch - aBranchMatch;
-          return Math.abs(a.cutoffPercentile - referenceItem.cutoffPercentile) - Math.abs(b.cutoffPercentile - referenceItem.cutoffPercentile);
-        });
-      } else {
-        candidates.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
-      }
-
-      currentModalCandidates = candidates.slice(0, 150); // Keep top 150 relevant matches
-      renderModalCandidateList(currentModalCandidates);
-    }
-
-    function filterSmartModalOptions() {
-      const query = document.getElementById('smart-modal-search').value.toLowerCase().trim();
-      const tierFilter = document.getElementById('smart-modal-filter-tier').value;
-
-      const filtered = currentModalCandidates.filter(item => {
-        if (tierFilter !== 'all' && item.tier !== tierFilter) return false;
-        if (!query) return true;
-        return item.instName.toLowerCase().includes(query) ||
-               item.branchName.toLowerCase().includes(query) ||
-               item.city.toLowerCase().includes(query) ||
-               item.instCode.includes(query);
-      });
-
-      renderModalCandidateList(filtered);
-    }
-
-    function renderModalCandidateList(list) {
-      const container = document.getElementById('smart-modal-list');
-      container.innerHTML = '';
-
-      if (list.length === 0) {
-        container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">No matching colleges found. Try broadening your search.</div>';
-        return;
-      }
-
-      list.slice(0, 50).forEach(candidate => {
-        const itemEl = document.createElement('div');
-        itemEl.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.75rem 1rem; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; transition: var(--transition);';
-        
-        let tierBadge = '';
-        if (candidate.tier === 'dream') tierBadge = '<span class="smart-badge-dream">🌟 Dream</span>';
-        else if (candidate.tier === 'target') tierBadge = '<span class="smart-badge-target">🎯 Target</span>';
-        else tierBadge = '<span class="smart-badge-safe">🛡️ Safe</span>';
-
-        itemEl.innerHTML = `
-          <div style="flex: 1; min-width: 0;">
-            <div style="font-size: 0.92rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-              <span>${candidate.instName}</span>
-              <span style="font-size: 0.75rem; color: var(--text-dim);">[${candidate.instCode}]</span>
-              ${tierBadge}
-            </div>
-            <div style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 1rem; flex-wrap: wrap;">
-              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${candidate.branchName}</span></span>
-              <span><strong>City:</strong> ${candidate.city}</span>
-              <span><strong>Cutoff:</strong> ${candidate.cutoffPercentile.toFixed(2)} %ile</span>
-            </div>
-          </div>
-          <button type="button" class="glow-button" style="padding: 0.4rem 0.9rem; font-size: 0.82rem; white-space: nowrap;">
-            ${smartActiveModalTargetIndex !== null ? 'Swap In' : 'Add to List'}
-          </button>
-        `;
-
-        itemEl.querySelector('button').onclick = () => selectModalCandidate(candidate);
-        container.appendChild(itemEl);
-      });
-    }
-
-    function selectModalCandidate(candidate) {
-      if (smartActiveModalTargetIndex !== null) {
-        // Replace
-        smartListState[smartActiveModalTargetIndex] = { ...candidate, optionNum: smartActiveModalTargetIndex + 1 };
-        showToast(`Replaced Option #${smartActiveModalTargetIndex + 1}`);
-      } else {
-        // Add to end
-        smartListState.push({ ...candidate, optionNum: smartListState.length + 1 });
-        showToast(`Added new option #${smartListState.length}`);
-      }
-
-      closeSmartModal();
-      renderSmartList();
-    }
-
-    // Export to CSV
-    function exportSmartListCSV() {
-      if (!smartListState.length) {
-        showToast("Please generate a preference list first.");
-        return;
-      }
-
-      const headers = ["Option Number", "Institute Code", "Institute Name", "Location/City", "Institute Type", "Branch Name", "Seat Quota", "Cutoff Percentile", "Closing Rank", "Admission Chance Tier"];
-      const rows = [headers.join(",")];
-
-      smartListState.forEach(item => {
-        const row = [
-          item.optionNum,
-          `"${item.instCode}"`,
-          `"${(item.instName || '').replace(/"/g, '""')}"`,
-          `"${(item.city || '').replace(/"/g, '""')}"`,
-          `"${(item.instType || '').replace(/"/g, '""')}"`,
-          `"${(item.branchName || '').replace(/"/g, '""')}"`,
-          `"${item.seatCode || 'General'}"`,
-          item.cutoffPercentile ? item.cutoffPercentile.toFixed(2) : "",
-          item.closingRank || "",
-          `"${item.tier.toUpperCase()}"`
-        ];
-        rows.push(row.join(","));
-      });
-
-      const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(rows.join("\n"));
-      const link = document.createElement("a");
-      link.setAttribute("href", csvContent);
-      link.setAttribute("download", `MahaCET_2026_Smart_CAP_Option_List.csv`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      showToast("Downloaded Smart CAP Preference List CSV successfully!");
-    }
-
-    // Print / PDF
-    function printSmartListPDF() {
-      if (!smartListState.length) {
-        showToast("Please generate a preference list first.");
-        return;
-      }
-      window.print();
-    }
-
-  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
   <style>
     /* =========================================================
        MAHACOLLEGE PREDICTOR 2026 — LIQUID GLASS THEME SYSTEM
@@ -3252,13 +2625,34 @@
           </div>
         </div>
 
+        <!-- FALLBACK NOTIFICATION BANNER (Shown when filters are progressively broadened) -->
+        <div id="smart-fallback-banner" style="display: none; background: rgba(50, 217, 255, 0.1); border: 1px solid rgba(50, 217, 255, 0.35); border-radius: var(--radius-md); padding: 0.85rem 1.25rem; margin-bottom: 1.25rem; font-size: 0.86rem; color: var(--text-main); line-height: 1.5;">
+          <div style="display: flex; align-items: flex-start; gap: 0.65rem;">
+            <span style="font-size: 1.1rem; color: var(--cyan);">✨</span>
+            <div id="smart-fallback-message">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+        </div>
+
         <!-- HINT CALLOUT -->
         <div style="background: rgba(36, 87, 255, 0.08); border: 1px solid rgba(50, 217, 255, 0.25); border-radius: var(--radius-md); padding: 0.75rem 1.25rem; margin-bottom: 1.25rem; font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.6rem;">
           <span>💡</span>
           <span>
-            <strong>Pro Strategy:</strong> The CET Cell allocates seats in order of preference. Keep aspirational <strong>Dream</strong> colleges at the top (#1–#7), highly probable <strong>Target</strong> colleges in the middle (#8–#19), and guaranteed <strong>Safe</strong> backups at the bottom (#20–#30). Use the ⬆️/⬇️ buttons to fine-tune your priority order.
+            <strong>Pro Strategy:</strong> The CET Cell allocates seats in order of preference. Keep aspirational <strong>Dream</strong> colleges at the top (#1–#7), highly probable <strong>Target</strong> colleges in the middle (#8–#19), and realistic <strong>Safe</strong> backups at the bottom (#20–#30). Use the ⬆️/⬇️ buttons to fine-tune your priority order.
           </span>
         </div>
+
+        <!-- DIAGNOSTIC & DEBUG DETAILS (Collapsible) -->
+        <details id="smart-debug-details" style="background: rgba(0, 0, 0, 0.28); border: 1px dashed var(--glass-border); border-radius: var(--radius-sm); padding: 0.75rem 1rem; margin-bottom: 1.25rem; font-size: 0.82rem; color: var(--text-muted);">
+          <summary style="cursor: pointer; font-weight: 600; color: var(--cyan); display: flex; align-items: center; gap: 0.4rem; user-select: none;">
+            <span>🔍 Diagnostic Filtering Details</span>
+            <span style="font-size: 0.72rem; color: var(--text-dim);">(Click to inspect dataset filtering breakdown)</span>
+          </summary>
+          <div id="smart-debug-content" style="margin-top: 0.75rem; padding-top: 0.5rem; border-top: 1px solid rgba(255,255,255,0.06); line-height: 1.7; font-family: monospace;">
+            <!-- Populated via JS -->
+          </div>
+        </details>
 
         <!-- LIST CONTAINER -->
         <div id="smart-options-list">
@@ -4722,6 +4116,788 @@ const CAT_LABELS = {OPEN:'Open',SC:'SC',ST:'ST',VJ:'VJ (DT-A)',NT1:'NT1 (DT-B)',
         showToast("Dataset validated successfully.");
       };
       reader.readAsText(file);
+    }
+
+  
+    /* =========================================================
+       SMART CAP OPTION FILLING LIST GENERATOR LOGIC
+       ========================================================= */
+    let smartListState = [];
+    let smartListOriginal = [];
+    let smartActiveModalTargetIndex = null;
+    let smartSelectedBranches = new Set();
+
+    // Branch Clusters & Aliases
+    const TECH_KEYWORDS = ['computer', 'information technology', 'artificial intelligence', 'data science', 'cyber', 'software', 'machine learning', 'cloud'];
+    const CIRCUITAL_KEYWORDS = ['electronics', 'telecommunication', 'electrical', 'instrumentation', 'communication'];
+    const CORE_KEYWORDS = ['mechanical', 'civil', 'chemical', 'automobile', 'production', 'aerospace', 'metallurgy', 'industrial'];
+
+    function getBranchCluster(branchName) {
+      const b = (branchName || '').toLowerCase();
+      for (const k of TECH_KEYWORDS) { if (b.includes(k)) return 'tech'; }
+      for (const k of CIRCUITAL_KEYWORDS) { if (b.includes(k)) return 'circuital'; }
+      for (const k of CORE_KEYWORDS) { if (b.includes(k)) return 'core'; }
+      return 'other';
+    }
+
+    // Initialize UI options for Smart List
+    function initSmartListUI() {
+      // Populate dream college dropdown
+      const dreamSelect = document.getElementById('smart-dream-college');
+      if (dreamSelect && dreamSelect.options.length <= 1) {
+        DATA.institutes.slice().sort((a, b) => a[1].localeCompare(b[1])).forEach(inst => {
+          const opt = document.createElement('option');
+          opt.value = inst[0];
+          opt.textContent = `${inst[0]} - ${inst[1]} (${inst[3] || 'MH'})`;
+          dreamSelect.appendChild(opt);
+        });
+      }
+
+      // Populate branch chips
+      const chipsContainer = document.getElementById('smart-branch-chips-container');
+      if (chipsContainer && chipsContainer.children.length === 0) {
+        UNIQUE_BRANCHES.slice().sort().forEach(br => {
+          const chip = document.createElement('div');
+          chip.className = 'smart-chip';
+          chip.dataset.branch = br;
+          chip.textContent = br;
+          chip.onclick = () => toggleSmartBranchChip(br, chip);
+          chipsContainer.appendChild(chip);
+        });
+
+        // Default: activate Tech branches
+        smartSelectBranchPreset('tech');
+      }
+    }
+
+    function toggleSmartBranchChip(branchName, chipEl) {
+      if (smartSelectedBranches.has(branchName)) {
+        smartSelectedBranches.delete(branchName);
+        chipEl.classList.remove('active');
+      } else {
+        smartSelectedBranches.add(branchName);
+        chipEl.classList.add('active');
+      }
+    }
+
+    function smartSelectBranchPreset(preset) {
+      const chips = document.querySelectorAll('#smart-branch-chips-container .smart-chip');
+      smartSelectedBranches.clear();
+
+      chips.forEach(chip => {
+        const br = chip.dataset.branch;
+        const cluster = getBranchCluster(br);
+        let match = false;
+
+        if (preset === 'tech') match = (cluster === 'tech');
+        else if (preset === 'circuital') match = (cluster === 'circuital');
+        else if (preset === 'core') match = (cluster === 'core');
+        else if (preset === 'all') match = true;
+        else if (preset === 'clear') match = false;
+
+        if (match) {
+          smartSelectedBranches.add(br);
+          chip.classList.add('active');
+        } else {
+          chip.classList.remove('active');
+        }
+      });
+
+      if (preset !== 'clear' && smartSelectedBranches.size === 0) {
+        chips.forEach((c, idx) => {
+          if (idx < 5) {
+            smartSelectedBranches.add(c.dataset.branch);
+            c.classList.add('active');
+          }
+        });
+      }
+    }
+
+    // Category and Gender quota verification
+    function isMatchingSeat(seatCode, prefCat, prefGender) {
+      if (!seatCode) return false;
+      if (prefCat === 'TFWS') return seatCode === 'TFWS';
+      if (prefCat === 'EWS') return seatCode === 'EWS';
+      if (!seatCode.includes(prefCat)) return false;
+
+      // Exclude special disability, defense, orphan and minority quotas unless student selected them
+      if (seatCode.startsWith('DEF') || seatCode.startsWith('PWD') || seatCode.startsWith('ORPHAN') || seatCode === 'MI') {
+        return false;
+      }
+
+      if (prefGender === 'L') {
+        return seatCode.startsWith('L') || seatCode.startsWith('G') || seatCode === prefCat;
+      } else if (prefGender === 'G') {
+        return seatCode.startsWith('G') || seatCode === prefCat;
+      }
+      return true;
+    }
+
+    const roundPriority = { 'CAP3': 3, 'CAP2': 2, 'CAP1': 1 };
+
+    // Intelligent Multi-Stage Progressive Recommendation Engine
+    function executeSmartCAPGenerator() {
+      const pctInput = document.getElementById('smart-percentile');
+      const pctVal = parseFloat(pctInput.value);
+      const errorEl = document.getElementById('smart-pct-error');
+
+      if (isNaN(pctVal) || pctVal < 0 || pctVal > 100) {
+        errorEl.style.display = 'block';
+        pctInput.focus();
+        return;
+      }
+      errorEl.style.display = 'none';
+
+      const prefCat = document.getElementById('smart-category').value;
+      const prefGender = document.getElementById('smart-gender').value;
+      const prefRound = document.getElementById('smart-round').value;
+      const prefDistrict = document.getElementById('smart-district').value;
+      const prefType = document.getElementById('smart-type').value;
+      const dreamCode = document.getElementById('smart-dream-college').value;
+
+      if (smartSelectedBranches.size === 0) {
+        showToast("Selecting All Tech Branches by default.");
+        smartSelectBranchPreset('tech');
+      }
+
+      const selectedBranchesArr = Array.from(smartSelectedBranches);
+
+      // Determine related branches in the same clusters
+      const selectedClusters = new Set(selectedBranchesArr.map(b => getBranchCluster(b)));
+      const relatedBranchesSet = new Set();
+      UNIQUE_BRANCHES.forEach(b => {
+        if (selectedClusters.has(getBranchCluster(b))) {
+          relatedBranchesSet.add(b);
+        }
+      });
+      const relatedBranchesArr = Array.from(relatedBranchesSet);
+
+      // Diagnostic Tracking
+      const diag = {
+        totalInstitutes: DATA.institutes.length,
+        totalCutoffs: DATA.cutoffs.length,
+        categoryMatched: 0,
+        branchMatched: 0,
+        roundMatched: 0,
+        stage1Count: 0,
+        relaxedSteps: [],
+        finalUniqueOptions: 0
+      };
+
+      // Count base matches for diagnostic report
+      DATA.cutoffs.forEach(c => {
+        if (isMatchingSeat(c[1], prefCat, prefGender)) {
+          diag.categoryMatched++;
+          const brName = BRANCH_MAP[c[0]];
+          if (smartSelectedBranches.has(brName)) {
+            diag.branchMatched++;
+            if (prefRound === 'any' || c[2] === prefRound) {
+              diag.roundMatched++;
+            }
+          }
+        }
+      });
+
+      // Helper to collect unique college+branch options matching specific filter relaxation levels
+      function collectCandidates(distFilter, branchFilterSet, typeFilter, roundFilter) {
+        const candMap = new Map();
+
+        DATA.cutoffs.forEach(c => {
+          const branchIdx = c[0];
+          const seatCode = c[1];
+          const round = c[2];
+          const cutoffPct = parseFloat(c[3]);
+          const closingRank = c[4];
+
+          if (isNaN(cutoffPct) || cutoffPct <= 0 || cutoffPct > 100) return;
+
+          // Mandatory filter 1: Category & Gender Quota Eligibility
+          if (!isMatchingSeat(seatCode, prefCat, prefGender)) return;
+
+          // Round filter
+          if (roundFilter !== 'any' && round !== roundFilter) return;
+
+          // Branch filter
+          const branchName = BRANCH_MAP[branchIdx];
+          if (branchFilterSet && !branchFilterSet.has(branchName)) return;
+
+          // Institute details
+          const branchData = DATA.branches[branchIdx];
+          const instIdx = branchData[1];
+          const inst = DATA.institutes[instIdx];
+          const instCode = inst[0];
+          const instName = inst[1];
+          const instType = inst[2];
+          const city = inst[3] || 'Maharashtra';
+
+          // District filter
+          if (distFilter !== 'all' && city !== distFilter) return;
+
+          // College Type filter
+          if (typeFilter !== 'all') {
+            const isGovtOrAided = instType.toLowerCase().includes('govt') ||
+                                  instType.toLowerCase().includes('government') ||
+                                  instType.toLowerCase().includes('university');
+            if (typeFilter === 'Government' && !isGovtOrAided) return;
+            if (typeFilter === 'Unaided' && isGovtOrAided) return;
+          }
+
+          // Percentile difference and tier calculation
+          const diff = pctVal - cutoffPct;
+          let tier = 'safe';
+          if (cutoffPct > pctVal) {
+            tier = 'dream';
+          } else if (diff <= 4.0) {
+            tier = 'target';
+          } else {
+            tier = 'safe';
+          }
+
+          const key = `${instCode}_${branchData[0] || branchName}`;
+          const rWeight = roundPriority[round] || 1;
+          const existing = candMap.get(key);
+          const existingRWeight = existing ? (roundPriority[existing.round] || 0) : -1;
+
+          if (!existing || rWeight > existingRWeight || (rWeight === existingRWeight && cutoffPct > existing.cutoffPercentile)) {
+            candMap.set(key, {
+              instCode: instCode,
+              instName: instName,
+              instType: instType,
+              city: city,
+              branchName: branchName,
+              branchCode: branchData[0],
+              seatCode: seatCode,
+              round: round,
+              cutoffPercentile: cutoffPct,
+              closingRank: closingRank,
+              diff: diff,
+              tier: tier
+            });
+          }
+        });
+
+        return Array.from(candMap.values());
+      }
+
+      // STAGE 1: Strict search matching all user selected preferences
+      let pool = collectCandidates(prefDistrict, smartSelectedBranches, prefType, prefRound);
+      diag.stage1Count = pool.length;
+      let stageReached = 1;
+
+      // STAGE 2: If < 25, expand location to all Maharashtra (preserving branches, category & type)
+      if (pool.length < 25 && prefDistrict !== 'all') {
+        stageReached = 2;
+        diag.relaxedSteps.push(`Expanded location from ${prefDistrict} to All Maharashtra to discover colleges for your preferred branches.`);
+        const extra = collectCandidates('all', smartSelectedBranches, prefType, prefRound);
+        const seen = new Set(pool.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        extra.forEach(item => {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!seen.has(k)) {
+            pool.push(item);
+            seen.add(k);
+          }
+        });
+      }
+
+      // STAGE 3: If still < 25, expand to related branches in the same engineering cluster
+      if (pool.length < 25 && relatedBranchesArr.length > selectedBranchesArr.length) {
+        stageReached = 3;
+        diag.relaxedSteps.push("Included closely related branch specializations (e.g. CSE, IT, AI & Data Science) to widen options.");
+        const extra = collectCandidates('all', relatedBranchesSet, prefType, prefRound);
+        const seen = new Set(pool.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        extra.forEach(item => {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!seen.has(k)) {
+            pool.push(item);
+            seen.add(k);
+          }
+        });
+      }
+
+      // STAGE 4: If still < 25, include historical cutoffs across all available CAP rounds
+      if (pool.length < 25 && prefRound !== 'any') {
+        stageReached = 4;
+        diag.relaxedSteps.push("Utilized historical cutoffs from all available CAP rounds (CAP 1, CAP 2, and CAP 3).");
+        const extra = collectCandidates('all', relatedBranchesSet, prefType, 'any');
+        const seen = new Set(pool.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        extra.forEach(item => {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!seen.has(k)) {
+            pool.push(item);
+            seen.add(k);
+          }
+        });
+      }
+
+      // STAGE 5: If still < 25, relax institute type to ensure student has adequate safe backup options
+      if (pool.length < 25 && prefType !== 'all') {
+        stageReached = 5;
+        diag.relaxedSteps.push("Included both Autonomous/Government-Aided and Private colleges to provide reliable safe options.");
+        const extra = collectCandidates('all', relatedBranchesSet, 'all', 'any');
+        const seen = new Set(pool.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        extra.forEach(item => {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!seen.has(k)) {
+            pool.push(item);
+            seen.add(k);
+          }
+        });
+      }
+
+      // STAGE 6: If still < 25, broaden to all eligible colleges matching category eligibility
+      if (pool.length < 25) {
+        stageReached = 6;
+        diag.relaxedSteps.push("Included all valid accredited engineering colleges across Maharashtra matching category eligibility.");
+        const extra = collectCandidates('all', null, 'all', 'any');
+        const seen = new Set(pool.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        extra.forEach(item => {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!seen.has(k)) {
+            pool.push(item);
+            seen.add(k);
+          }
+        });
+      }
+
+      // Handle Dream College Pinning to Option #1
+      let pinnedDreamOption = null;
+      if (dreamCode !== 'none') {
+        const dreamMatches = pool.filter(item => item.instCode === dreamCode);
+        if (dreamMatches.length > 0) {
+          dreamMatches.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+          pinnedDreamOption = dreamMatches[0];
+          pinnedDreamOption.tier = 'dream';
+          pinnedDreamOption.isPinned = true;
+        } else {
+          // If dream college not in current pool, pull its highest cutoff branch
+          DATA.cutoffs.forEach(c => {
+            const bIdx = c[0];
+            const bData = DATA.branches[bIdx];
+            const inst = DATA.institutes[bData[1]];
+            if (inst[0] === dreamCode && isMatchingSeat(c[1], prefCat, prefGender)) {
+              const cPct = parseFloat(c[3]);
+              if (!pinnedDreamOption || cPct > pinnedDreamOption.cutoffPercentile) {
+                pinnedDreamOption = {
+                  instCode: inst[0],
+                  instName: inst[1],
+                  instType: inst[2],
+                  city: inst[3] || 'Maharashtra',
+                  branchName: BRANCH_MAP[bIdx],
+                  branchCode: bData[0],
+                  seatCode: c[1],
+                  round: c[2],
+                  cutoffPercentile: cPct,
+                  closingRank: c[4],
+                  diff: pctVal - cPct,
+                  tier: 'dream',
+                  isPinned: true
+                };
+              }
+            }
+          });
+        }
+      }
+
+      // Segregate into Tiers
+      const dreamPool = pool.filter(x => x.tier === 'dream' && (!pinnedDreamOption || x.instCode !== pinnedDreamOption.instCode || x.branchName !== pinnedDreamOption.branchName));
+      const targetPool = pool.filter(x => x.tier === 'target' && (!pinnedDreamOption || x.instCode !== pinnedDreamOption.instCode || x.branchName !== pinnedDreamOption.branchName));
+      const safePool = pool.filter(x => x.tier === 'safe' && (!pinnedDreamOption || x.instCode !== pinnedDreamOption.instCode || x.branchName !== pinnedDreamOption.branchName));
+
+      // Intelligent Ranking per Tier:
+      // Dream: highest cutoff descending (most aspirational at top)
+      dreamPool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+      // Target: closest to student's percentile first
+      targetPool.sort((a, b) => Math.abs(a.diff) - Math.abs(b.diff));
+      // Safe: comfortable cutoffs descending
+      safePool.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+
+      // Target total: 30 options (or up to pool size if < 30)
+      const targetTotal = Math.min(30, pool.length + (pinnedDreamOption ? 1 : 0));
+
+      const selectedList = [];
+      if (pinnedDreamOption) {
+        selectedList.push(pinnedDreamOption);
+      }
+
+      // Guideline distribution: Dream ~20-25% (6-7), Target ~40-50% (12-14), Safe ~25-35% (9-10)
+      const desiredDream = pinnedDreamOption ? 6 : 7;
+      const desiredTarget = 13;
+      const desiredSafe = 10;
+
+      selectedList.push(...dreamPool.slice(0, desiredDream));
+      selectedList.push(...targetPool.slice(0, desiredTarget));
+      selectedList.push(...safePool.slice(0, desiredSafe));
+
+      // Dynamic Backfill: If any tier has fewer options (e.g. ultra-high percentile where Dream < 6, or low percentile where Safe < 10), backfill from other tiers
+      if (selectedList.length < targetTotal) {
+        const remainingCandidates = [
+          ...targetPool.slice(desiredTarget),
+          ...safePool.slice(desiredSafe),
+          ...dreamPool.slice(desiredDream)
+        ];
+
+        const existingKeys = new Set(selectedList.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+        for (const item of remainingCandidates) {
+          const k = `${item.instCode}_${item.branchCode || item.branchName}`;
+          if (!existingKeys.has(k)) {
+            selectedList.push(item);
+            existingKeys.add(k);
+            if (selectedList.length >= targetTotal) break;
+          }
+        }
+      }
+
+      // Assign sequential option numbers 1 to N
+      smartListState = selectedList.map((item, idx) => ({ ...item, optionNum: idx + 1 }));
+      smartListOriginal = JSON.parse(JSON.stringify(smartListState));
+
+      diag.finalUniqueOptions = smartListState.length;
+
+      // Update Fallback Banner
+      const fallbackBanner = document.getElementById('smart-fallback-banner');
+      const fallbackMsg = document.getElementById('smart-fallback-message');
+      if (fallbackBanner && fallbackMsg) {
+        if (diag.relaxedSteps.length > 0) {
+          fallbackBanner.style.display = 'block';
+          fallbackMsg.innerHTML = `<strong>Search Optimization Applied:</strong> Your initial strict preferences produced <strong>${diag.stage1Count}</strong> options. To provide a complete, robust preference list of <strong>${smartListState.length}</strong> colleges, we progressively broadened the criteria:<br>• ${diag.relaxedSteps.join('<br>• ')}`;
+        } else {
+          fallbackBanner.style.display = 'none';
+        }
+      }
+
+      // Update Debug Details
+      const debugContent = document.getElementById('smart-debug-content');
+      if (debugContent) {
+        debugContent.innerHTML = `
+          <strong>[DATASET DIAGNOSTICS]</strong><br>
+          • Total Accredited Colleges in Dataset: <strong>${diag.totalInstitutes}</strong><br>
+          • Total Historical Cutoff Records: <strong>${diag.totalCutoffs.toLocaleString()}</strong><br>
+          • Records Matching Category (${prefCat}) & Gender (${prefGender}): <strong>${diag.categoryMatched.toLocaleString()}</strong><br>
+          • Records Matching Selected Branches: <strong>${diag.branchMatched.toLocaleString()}</strong><br>
+          • Records Matching Round (${prefRound}): <strong>${diag.roundMatched.toLocaleString()}</strong><br>
+          • Initial Strict Combination Matches: <strong>${diag.stage1Count}</strong><br>
+          • Progressive Stage Reached: <strong>Stage ${stageReached}</strong><br>
+          • Filters Relaxed: <strong>${diag.relaxedSteps.length ? diag.relaxedSteps.join('; ') : 'None (Strict preferences satisfied target)'}</strong><br>
+          • Final Valid Unique Recommendations: <strong>${diag.finalUniqueOptions}</strong>
+        `;
+      }
+
+      // Render the results
+      renderSmartList();
+
+      const resultsContainer = document.getElementById('smartlist-results-container');
+      resultsContainer.style.display = 'block';
+      resultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      showToast(`Generated ${smartListState.length} verified CAP college options.`);
+    }
+
+    // Render option cards
+    function renderSmartList() {
+      const listContainer = document.getElementById('smart-options-list');
+      if (!listContainer) return;
+
+      listContainer.innerHTML = '';
+
+      let dreamCount = 0;
+      let targetCount = 0;
+      let safeCount = 0;
+
+      smartListState.forEach((item, idx) => {
+        item.optionNum = idx + 1;
+        if (item.tier === 'dream') dreamCount++;
+        else if (item.tier === 'target') targetCount++;
+        else safeCount++;
+
+        const card = document.createElement('div');
+        card.className = `smart-option-card tier-${item.tier}`;
+        card.id = `smart-opt-card-${idx}`;
+
+        let tierBadgeHtml = '';
+        if (item.tier === 'dream') {
+          tierBadgeHtml = `<span class="smart-badge-dream">${item.isPinned ? '📌 Designated Dream' : '🌟 Dream'}</span>`;
+        } else if (item.tier === 'target') {
+          tierBadgeHtml = `<span class="smart-badge-target">🎯 Target</span>`;
+        } else {
+          tierBadgeHtml = `<span class="smart-badge-safe">🛡️ Safe</span>`;
+        }
+
+        const isFirst = idx === 0;
+        const isLast = idx === smartListState.length - 1;
+
+        const cutoffLabel = item.cutoffPercentile ? `${item.cutoffPercentile.toFixed(2)} %ile` : 'N/A';
+        const rankLabel = item.closingRank ? `Rank ${item.closingRank.toLocaleString()}` : '';
+
+        card.innerHTML = `
+          <div class="smart-opt-num">#${item.optionNum}</div>
+          <div class="smart-opt-body">
+            <div class="smart-opt-title">
+              <a href="#college/${item.instCode}" onclick="showCollegeDetailPage('${item.instCode}')" style="color: var(--text-main); text-decoration: none;">
+                ${item.instName}
+              </a>
+              <span style="font-size: 0.78rem; color: var(--text-dim); font-weight: 500;">[Code: ${item.instCode}]</span>
+              ${tierBadgeHtml}
+            </div>
+            <div class="smart-opt-sub">
+              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${item.branchName}</span></span>
+              <span><strong>City:</strong> ${item.city}</span>
+              <span><strong>Cutoff:</strong> ${cutoffLabel}</span>
+              ${rankLabel ? `<span><strong>Closing:</strong> ${rankLabel}</span>` : ''}
+              <span><strong>Quota:</strong> ${item.seatCode || 'General'}</span>
+            </div>
+          </div>
+          <div class="smart-opt-actions">
+            <button type="button" class="btn-opt-action" title="Move Up" onclick="moveSmartOption(${idx}, -1)" ${isFirst ? 'disabled' : ''}>⬆️</button>
+            <button type="button" class="btn-opt-action" title="Move Down" onclick="moveSmartOption(${idx}, 1)" ${isLast ? 'disabled' : ''}>⬇️</button>
+            <button type="button" class="btn-opt-action" title="Replace with Alternative" onclick="openReplaceSmartModal(${idx})">🔄</button>
+            <button type="button" class="btn-opt-action delete" title="Remove Option" onclick="removeSmartOption(${idx})">✕</button>
+          </div>
+        `;
+
+        listContainer.appendChild(card);
+      });
+
+      // Update counters
+      document.getElementById('smart-total-count').textContent = `${smartListState.length} Options`;
+      document.getElementById('smart-badge-dream-count').textContent = `🌟 ${dreamCount} Dream`;
+      document.getElementById('smart-badge-target-count').textContent = `🎯 ${targetCount} Target`;
+      document.getElementById('smart-badge-safe-count').textContent = `🛡️ ${safeCount} Safe`;
+    }
+
+    // Move option up or down
+    function moveSmartOption(index, direction) {
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= smartListState.length) return;
+
+      const temp = smartListState[index];
+      smartListState[index] = smartListState[targetIndex];
+      smartListState[targetIndex] = temp;
+
+      renderSmartList();
+      showToast(`Moved option to #${targetIndex + 1}`);
+    }
+
+    // Remove option
+    function removeSmartOption(index) {
+      const removed = smartListState.splice(index, 1)[0];
+      renderSmartList();
+      showToast(`Removed #${index + 1}: ${removed.instName.slice(0, 24)}...`);
+    }
+
+    // Reset list order to original recommendation
+    function resetSmartOrder() {
+      if (!smartListOriginal.length) return;
+      smartListState = JSON.parse(JSON.stringify(smartListOriginal));
+      renderSmartList();
+      showToast("Preference list order restored to algorithmic recommendation.");
+    }
+
+    // Modal Handling for Replace & Add
+    function openReplaceSmartModal(index) {
+      smartActiveModalTargetIndex = index;
+      const targetItem = smartListState[index];
+      document.getElementById('smart-modal-title').textContent = `Replace Option #${index + 1} (${targetItem.branchName.slice(0, 30)}...)`;
+      document.getElementById('smart-modal-search').value = '';
+      document.getElementById('smart-modal-filter-tier').value = targetItem.tier || 'all';
+
+      populateSmartModalCandidates(targetItem);
+      document.getElementById('smart-modal-backdrop').classList.add('open');
+    }
+
+    function openAddSmartModal() {
+      smartActiveModalTargetIndex = null;
+      document.getElementById('smart-modal-title').textContent = "Add College Option to Preference List";
+      document.getElementById('smart-modal-search').value = '';
+      document.getElementById('smart-modal-filter-tier').value = 'all';
+
+      populateSmartModalCandidates(null);
+      document.getElementById('smart-modal-backdrop').classList.add('open');
+    }
+
+    function closeSmartModal() {
+      document.getElementById('smart-modal-backdrop').classList.remove('open');
+    }
+
+    let currentModalCandidates = [];
+
+    function populateSmartModalCandidates(referenceItem) {
+      const pctInput = document.getElementById('smart-percentile');
+      const studentPct = parseFloat(pctInput.value) || 95.0;
+      const existingKeys = new Set(smartListState.map(item => `${item.instCode}_${item.branchCode || item.branchName}`));
+
+      const listContainer = document.getElementById('smart-modal-list');
+      listContainer.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">Loading candidates from verified cutoffs...</div>';
+
+      const candidates = [];
+      const seen = new Set();
+
+      DATA.cutoffs.forEach(c => {
+        const branchIdx = c[0];
+        const seatCode = c[1];
+        const round = c[2];
+        const cutoffPct = parseFloat(c[3]);
+        const closingRank = c[4];
+
+        if (isNaN(cutoffPct) || cutoffPct <= 0 || cutoffPct > 100) return;
+
+        const branchData = DATA.branches[branchIdx];
+        const instIdx = branchData[1];
+        const inst = DATA.institutes[instIdx];
+        const instCode = inst[0];
+        const branchName = BRANCH_MAP[branchIdx];
+
+        const key = `${instCode}_${branchData[0] || branchName}`;
+        if (existingKeys.has(key) || seen.has(key)) return;
+
+        let tier = 'safe';
+        if (cutoffPct > studentPct) tier = 'dream';
+        else if (studentPct - cutoffPct <= 4.0) tier = 'target';
+        else tier = 'safe';
+
+        seen.add(key);
+        candidates.push({
+          instCode: instCode,
+          instName: inst[1],
+          instType: inst[2],
+          city: inst[3] || 'Maharashtra',
+          branchName: branchName,
+          branchCode: branchData[0],
+          seatCode: seatCode,
+          round: round,
+          cutoffPercentile: cutoffPct,
+          closingRank: closingRank,
+          tier: tier
+        });
+      });
+
+      if (referenceItem) {
+        candidates.sort((a, b) => {
+          const aBranchMatch = a.branchName === referenceItem.branchName ? 1 : 0;
+          const bBranchMatch = b.branchName === referenceItem.branchName ? 1 : 0;
+          if (aBranchMatch !== bBranchMatch) return bBranchMatch - aBranchMatch;
+          return Math.abs(a.cutoffPercentile - referenceItem.cutoffPercentile) - Math.abs(b.cutoffPercentile - referenceItem.cutoffPercentile);
+        });
+      } else {
+        candidates.sort((a, b) => b.cutoffPercentile - a.cutoffPercentile);
+      }
+
+      currentModalCandidates = candidates.slice(0, 150);
+      renderModalCandidateList(currentModalCandidates);
+    }
+
+    function filterSmartModalOptions() {
+      const query = document.getElementById('smart-modal-search').value.toLowerCase().trim();
+      const tierFilter = document.getElementById('smart-modal-filter-tier').value;
+
+      const filtered = currentModalCandidates.filter(item => {
+        if (tierFilter !== 'all' && item.tier !== tierFilter) return false;
+        if (!query) return true;
+        return item.instName.toLowerCase().includes(query) ||
+               item.branchName.toLowerCase().includes(query) ||
+               item.city.toLowerCase().includes(query) ||
+               item.instCode.includes(query);
+      });
+
+      renderModalCandidateList(filtered);
+    }
+
+    function renderModalCandidateList(list) {
+      const container = document.getElementById('smart-modal-list');
+      container.innerHTML = '';
+
+      if (list.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2.5rem;">No matching colleges found. Try broadening your search.</div>';
+        return;
+      }
+
+      list.slice(0, 50).forEach(candidate => {
+        const itemEl = document.createElement('div');
+        itemEl.style.cssText = 'background: rgba(255,255,255,0.03); border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.75rem 1rem; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; transition: var(--transition);';
+
+        let tierBadge = '';
+        if (candidate.tier === 'dream') tierBadge = '<span class="smart-badge-dream">🌟 Dream</span>';
+        else if (candidate.tier === 'target') tierBadge = '<span class="smart-badge-target">🎯 Target</span>';
+        else tierBadge = '<span class="smart-badge-safe">🛡️ Safe</span>';
+
+        itemEl.innerHTML = `
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-size: 0.92rem; font-weight: 700; color: var(--text-main); margin-bottom: 0.2rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+              <span>${candidate.instName}</span>
+              <span style="font-size: 0.75rem; color: var(--text-dim);">[${candidate.instCode}]</span>
+              ${tierBadge}
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 1rem; flex-wrap: wrap;">
+              <span><strong>Branch:</strong> <span style="color: var(--cyan);">${candidate.branchName}</span></span>
+              <span><strong>City:</strong> ${candidate.city}</span>
+              <span><strong>Cutoff:</strong> ${candidate.cutoffPercentile.toFixed(2)} %ile</span>
+            </div>
+          </div>
+          <button type="button" class="glow-button" style="padding: 0.4rem 0.9rem; font-size: 0.82rem; white-space: nowrap;">
+            ${smartActiveModalTargetIndex !== null ? 'Swap In' : 'Add to List'}
+          </button>
+        `;
+
+        itemEl.querySelector('button').onclick = () => selectModalCandidate(candidate);
+        container.appendChild(itemEl);
+      });
+    }
+
+    function selectModalCandidate(candidate) {
+      if (smartActiveModalTargetIndex !== null) {
+        smartListState[smartActiveModalTargetIndex] = { ...candidate, optionNum: smartActiveModalTargetIndex + 1 };
+        showToast(`Replaced Option #${smartActiveModalTargetIndex + 1}`);
+      } else {
+        smartListState.push({ ...candidate, optionNum: smartListState.length + 1 });
+        showToast(`Added new option #${smartListState.length}`);
+      }
+
+      closeSmartModal();
+      renderSmartList();
+    }
+
+    // Export to CSV
+    function exportSmartListCSV() {
+      if (!smartListState.length) {
+        showToast("Please generate a preference list first.");
+        return;
+      }
+
+      const headers = ["Option Number", "Institute Code", "Institute Name", "Location/City", "Institute Type", "Branch Name", "Seat Quota", "Cutoff Percentile", "Closing Rank", "Admission Chance Tier"];
+      const rows = [headers.join(",")];
+
+      smartListState.forEach(item => {
+        const row = [
+          item.optionNum,
+          `"${item.instCode}"`,
+          `"${(item.instName || '').replace(/"/g, '""')}"`,
+          `"${(item.city || '').replace(/"/g, '""')}"`,
+          `"${(item.instType || '').replace(/"/g, '""')}"`,
+          `"${(item.branchName || '').replace(/"/g, '""')}"`,
+          `"${item.seatCode || 'General'}"`,
+          item.cutoffPercentile ? item.cutoffPercentile.toFixed(2) : "",
+          item.closingRank || "",
+          `"${item.tier.toUpperCase()}"`
+        ];
+        rows.push(row.join(","));
+      });
+
+      const csvContent = "data:text/csv;charset=utf-8," + encodeURIComponent(rows.join("\n"));
+      const link = document.createElement("a");
+      link.setAttribute("href", csvContent);
+      link.setAttribute("download", `MahaCET_2026_Smart_CAP_Option_List.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast("Downloaded Smart CAP Preference List CSV successfully!");
+    }
+
+    // Print / PDF
+    function printSmartListPDF() {
+      if (!smartListState.length) {
+        showToast("Please generate a preference list first.");
+        return;
+      }
+      window.print();
     }
 
   </script>
